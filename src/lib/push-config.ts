@@ -1,6 +1,7 @@
 // Public VAPID key — safe to ship to the client.
 // (The private key is stored server-side as VAPID_PRIVATE_KEY.)
 export const VAPID_PUBLIC_KEY =
+  import.meta.env.VITE_VAPID_PUBLIC_KEY ||
   "BLlV3aD6TSIPLcgjdBeRGpBiRYqT_f2kmjXepX0QxaJQSYNQ4WWvAazlI7Pi1vKMsmExvCD6SI6D_Y00C4Qfdd4";
 
 export function urlBase64ToUint8Array(base64String: string): Uint8Array {
