@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel, User } from "@supabase/supabase-js";
 import { useServerFn } from "@tanstack/react-start";
+import { Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { lockGate } from "@/lib/gate.functions";
 import { QuickExit } from "./QuickExit";
@@ -31,7 +32,51 @@ export function ChatRoom() {
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(0);
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+  const [clearedAt, setClearedAt] = useState<number>(0);
   const channelRef = useRef<RealtimeChannel | null>(null);
+
+  const hiddenKey = user ? `chat:hidden:${user.id}` : null;
+  const clearedKey = user ? `chat:clearedAt:${user.id}` : null;
+
+  // Load per-user local hide state
+  useEffect(() => {
+    if (!hiddenKey || !clearedKey) return;
+    try {
+      const h = JSON.parse(localStorage.getItem(hiddenKey) || "[]") as string[];
+      setHiddenIds(new Set(h));
+      const c = Number(localStorage.getItem(clearedKey) || "0");
+      setClearedAt(c);
+    } catch {
+      // ignore
+    }
+  }, [hiddenKey, clearedKey]);
+
+  const visibleMessages = useMemo(
+    () =>
+      messages.filter(
+        (m) => !hiddenIds.has(m.id) && new Date(m.created_at).getTime() > clearedAt,
+      ),
+    [messages, hiddenIds, clearedAt],
+  );
+
+  function hideMessage(id: string) {
+    setHiddenIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      if (hiddenKey) localStorage.setItem(hiddenKey, JSON.stringify([...next]));
+      return next;
+    });
+  }
+
+  function clearAll() {
+    if (!clearedKey || !hiddenKey) return;
+    const now = Date.now();
+    localStorage.setItem(clearedKey, String(now));
+    localStorage.setItem(hiddenKey, "[]");
+    setClearedAt(now);
+    setHiddenIds(new Set());
+  }
 
 
 
@@ -217,8 +262,8 @@ export function ChatRoom() {
     ? "from-emerald-400 to-teal-500"
     : "from-blue-400 via-purple-500 to-pink-500";
 
-  // Last message preview + unread count for the sidebar
-  const lastMsg = messages[messages.length - 1];
+  // Last message preview + unread count for the sidebar (respect local hides)
+  const lastMsg = visibleMessages[visibleMessages.length - 1];
   const lastMessagePreview = lastMsg
     ? lastMsg.voice_path
       ? "🎤 Voice message"
@@ -232,8 +277,14 @@ export function ChatRoom() {
     ? new Date(lastMsg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "";
   const unreadCount = user
-    ? messages.filter((m) => m.sender_id !== user.id && !m.read_at).length
+    ? visibleMessages.filter((m) => m.sender_id !== user.id && !m.read_at).length
     : 0;
+
+  function onClearChat() {
+    if (typeof window !== "undefined" && window.confirm("Delete this chat from your view? Messages stay for the other person.")) {
+      clearAll();
+    }
+  }
 
   return (
     <div className="flex h-[100dvh] w-full bg-[#0a0a0a] text-slate-100">
@@ -274,12 +325,23 @@ export function ChatRoom() {
             </div>
           </div>
 
-          <QuickExit />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClearChat}
+              aria-label="Clear chat for me"
+              title="Clear chat for me"
+              className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-rose-300 active:scale-95"
+            >
+              <Trash2 className="h-[18px] w-[18px]" />
+            </button>
+            <QuickExit />
+          </div>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col lg:mx-auto lg:w-full lg:max-w-[880px]">
-            <MessageList messages={messages} currentUserId={user?.id ?? null} profiles={profiles} />
+            <MessageList messages={visibleMessages} currentUserId={user?.id ?? null} profiles={profiles} onHideMessage={hideMessage} />
 
             <Composer
               currentUserId={user?.id ?? null}

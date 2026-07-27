@@ -4,6 +4,7 @@ import data from "@emoji-mart/data";
 import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
 import { VoiceRecorder } from "./VoiceRecorder";
+import { GifPicker } from "./GifPicker";
 import { notifyPeer } from "@/lib/push.functions";
 
 export function Composer({
@@ -17,6 +18,7 @@ export function Composer({
 }) {
   const [text, setText] = useState("");
   const [showEmoji, setShowEmoji] = useState(false);
+  const [showGif, setShowGif] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -95,16 +97,43 @@ export function Composer({
     ping();
   }
 
+  async function sendGif(url: string) {
+    if (!currentUserId) return;
+    setShowGif(false);
+    await supabase.from("messages").insert({
+      conversation_id: conversationId,
+      sender_id: currentUserId,
+      body: url,
+      media_kind: "gif",
+    });
+    ping();
+  }
+
+
   return (
     <div className="border-t border-white/5 bg-[#171717] px-4 py-3">
       <div className="relative mx-auto flex w-full items-end gap-2">
         <button
           type="button"
-          onClick={() => setShowEmoji((s) => !s)}
+          onClick={() => {
+            setShowEmoji((s) => !s);
+            setShowGif(false);
+          }}
           className="grid h-9 w-9 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
           aria-label="Emoji"
         >
           😊
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setShowGif((s) => !s);
+            setShowEmoji(false);
+          }}
+          className="grid h-9 w-9 place-items-center rounded-full text-[10px] font-bold text-slate-300 hover:bg-white/10"
+          aria-label="GIF"
+        >
+          GIF
         </button>
         <input ref={fileRef} type="file" hidden onChange={onFile} accept="image/*,video/*" />
         <button
@@ -157,6 +186,13 @@ export function Composer({
               }}
             />
           </div>
+        )}
+        {showGif && currentUserId && (
+          <GifPicker
+            customerId={currentUserId}
+            onPick={(url) => sendGif(url)}
+            onClose={() => setShowGif(false)}
+          />
         )}
       </div>
     </div>

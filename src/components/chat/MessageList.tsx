@@ -22,12 +22,29 @@ export function MessageList({
   messages,
   currentUserId,
   profiles,
+  onHideMessage,
 }: {
   messages: ChatMessage[];
   currentUserId: string | null;
   profiles: Record<string, Profile>;
+  onHideMessage?: (id: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [menuId, setMenuId] = useState<string | null>(null);
+  const pressTimer = useRef<number | null>(null);
+  const startPress = (id: string) => {
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    pressTimer.current = window.setTimeout(() => {
+      setMenuId(id);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 450);
+  };
+  const cancelPress = () => {
+    if (pressTimer.current) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  };
   const [showJump, setShowJump] = useState(false);
 
   function isNearBottom() {
@@ -74,7 +91,16 @@ export function MessageList({
               )}
               <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[75%] rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenuId(m.id);
+                  }}
+                  onPointerDown={() => startPress(m.id)}
+                  onPointerUp={cancelPress}
+                  onPointerLeave={cancelPress}
+                  onPointerCancel={cancelPress}
+                  onTouchMove={cancelPress}
+                  className={`max-w-[75%] select-none rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
                     mine
                       ? "rounded-br-md bg-rose-500 text-white"
                       : "rounded-bl-md bg-[#1f1f1f] text-slate-100"
@@ -101,6 +127,36 @@ export function MessageList({
       {/* touch profiles so tsc doesn't drop it */}
       <span className="hidden">{Object.keys(profiles).length}</span>
       </div>
+      {menuId && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 sm:items-center"
+          onClick={() => setMenuId(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mb-4 w-[calc(100%-2rem)] max-w-xs overflow-hidden rounded-2xl bg-[#1f1f1f] shadow-2xl ring-1 ring-white/10"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                const id = menuId;
+                setMenuId(null);
+                if (id) onHideMessage?.(id);
+              }}
+              className="block w-full px-4 py-3 text-left text-sm font-medium text-rose-400 hover:bg-white/5"
+            >
+              Delete for me
+            </button>
+            <button
+              type="button"
+              onClick={() => setMenuId(null)}
+              className="block w-full border-t border-white/5 px-4 py-3 text-left text-sm text-slate-300 hover:bg-white/5"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       {showJump && (
         <button
           type="button"
@@ -117,6 +173,9 @@ export function MessageList({
 
 
 function Bubble({ msg }: { msg: ChatMessage }) {
+  if (msg.media_kind === "gif" && msg.body) {
+    return <img src={msg.body} alt="gif" className="h-40 w-40 rounded-lg object-cover sm:h-44 sm:w-44" />;
+  }
   if (msg.media_path) return <MediaBubble path={msg.media_path} kind={msg.media_kind} body={msg.body} />;
   if (msg.voice_path) return <VoiceBubble path={msg.voice_path} durationMs={msg.voice_duration_ms} />;
   return <span className="whitespace-pre-wrap break-words">{msg.body}</span>;
