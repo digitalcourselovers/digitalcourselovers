@@ -27,7 +27,7 @@ export const lockGate = createServerFn({ method: "POST" }).handler(async () => {
   return { ok: true as const };
 });
 
-// One-time setup: create the two accounts. Only runs while zero profiles exist.
+// One-time setup: create the two accounts. Only runs while zero profiles exists.
 export const setupTwoAccounts = createServerFn({ method: "POST" })
   .inputValidator(
     (data: {
