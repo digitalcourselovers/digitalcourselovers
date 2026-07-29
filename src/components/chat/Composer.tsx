@@ -1,24 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import Picker from "@emoji-mart/react";
-import data from "@emoji-mart/data";
+import { X } from "lucide-react";
 import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
 import { VoiceRecorder } from "./VoiceRecorder";
-import { GifPicker } from "./GifPicker";
+import { StickerPicker } from "./StickerPicker";
 import { notifyPeer } from "@/lib/push.functions";
+
+export type ReplyTarget = {
+  id: string;
+  senderName: string;
+  preview: string;
+};
 
 export function Composer({
   currentUserId,
   conversationId,
   onTyping,
+  replyTarget,
+  onClearReply,
 }: {
   currentUserId: string | null;
   conversationId: string;
   onTyping: () => void;
+  replyTarget: ReplyTarget | null;
+  onClearReply: () => void;
 }) {
   const [text, setText] = useState("");
-  const [showEmoji, setShowEmoji] = useState(false);
-  const [showGif, setShowGif] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -31,6 +39,10 @@ export function Composer({
     textareaRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    if (replyTarget) textareaRef.current?.focus();
+  }, [replyTarget]);
+
   async function send() {
     if (!currentUserId) return;
     const body = text.trim();
@@ -40,10 +52,12 @@ export function Composer({
       conversation_id: conversationId,
       sender_id: currentUserId,
       body,
+      reply_to_id: replyTarget?.id ?? null,
     });
     setBusy(false);
     if (!error) {
       setText("");
+      onClearReply();
       textareaRef.current?.focus();
       ping();
     }
@@ -68,8 +82,10 @@ export function Composer({
       media_path: path,
       media_kind: file.type,
       body: text.trim() || null,
+      reply_to_id: replyTarget?.id ?? null,
     });
     setText("");
+    onClearReply();
     setBusy(false);
     if (fileRef.current) fileRef.current.value = "";
     ping();
@@ -78,9 +94,10 @@ export function Composer({
   async function sendVoice(blob: Blob, durationMs: number) {
     if (!currentUserId) return;
     setBusy(true);
-    const path = `${currentUserId}/voice-${crypto.randomUUID()}.webm`;
+    const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "mp4" : "webm";
+    const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}`;
     const { error: upErr } = await supabase.storage.from("chat-media").upload(path, blob, {
-      contentType: blob.type || "audio/webm",
+      contentType: blob.type || "audio/wav",
     });
     if (upErr) {
       setBusy(false);
@@ -92,48 +109,55 @@ export function Composer({
       sender_id: currentUserId,
       voice_path: path,
       voice_duration_ms: durationMs,
+      reply_to_id: replyTarget?.id ?? null,
     });
+    onClearReply();
     setBusy(false);
     ping();
   }
 
   async function sendGif(url: string) {
     if (!currentUserId) return;
-    setShowGif(false);
+    setShowPicker(false);
     await supabase.from("messages").insert({
       conversation_id: conversationId,
       sender_id: currentUserId,
       body: url,
       media_kind: "gif",
+      reply_to_id: replyTarget?.id ?? null,
     });
+    onClearReply();
     ping();
   }
 
-
   return (
     <div className="border-t border-white/5 bg-[#171717] px-4 py-3">
+      {replyTarget && (
+        <div className="mx-auto mb-2 flex w-full items-start gap-2 rounded-lg border-l-2 border-rose-400 bg-white/5 px-3 py-1.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-semibold text-rose-300">
+              Replying to {replyTarget.senderName}
+            </div>
+            <div className="truncate text-xs text-slate-300">{replyTarget.preview}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClearReply}
+            aria-label="Cancel reply"
+            className="rounded p-1 text-slate-400 hover:bg-white/10"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       <div className="relative mx-auto flex w-full items-end gap-2">
         <button
           type="button"
-          onClick={() => {
-            setShowEmoji((s) => !s);
-            setShowGif(false);
-          }}
+          onClick={() => setShowPicker((s) => !s)}
           className="grid h-9 w-9 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
-          aria-label="Emoji"
+          aria-label="Emoji and GIF"
         >
           😊
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setShowGif((s) => !s);
-            setShowEmoji(false);
-          }}
-          className="grid h-9 w-9 place-items-center rounded-full text-[10px] font-bold text-slate-300 hover:bg-white/10"
-          aria-label="GIF"
-        >
-          GIF
         </button>
         <input ref={fileRef} type="file" hidden onChange={onFile} accept="image/*,video/*" />
         <button
@@ -174,24 +198,15 @@ export function Composer({
         ) : (
           <VoiceRecorder onSend={sendVoice} disabled={busy} />
         )}
-        {showEmoji && (
-          <div className="absolute bottom-14 left-0 z-10">
-            <Picker
-              data={data}
-              theme="dark"
-              onEmojiSelect={(e: { native: string }) => {
-                setText((t) => t + e.native);
-                setShowEmoji(false);
-                textareaRef.current?.focus();
-              }}
-            />
-          </div>
-        )}
-        {showGif && currentUserId && (
-          <GifPicker
+        {showPicker && currentUserId && (
+          <StickerPicker
             customerId={currentUserId}
-            onPick={(url) => sendGif(url)}
-            onClose={() => setShowGif(false)}
+            onEmoji={(e) => {
+              setText((t) => t + e);
+              textareaRef.current?.focus();
+            }}
+            onGif={(url) => sendGif(url)}
+            onClose={() => setShowPicker(false)}
           />
         )}
       </div>

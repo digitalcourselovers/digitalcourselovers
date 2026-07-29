@@ -47,17 +47,19 @@ const normalizeItems = (payload: KlipyApiResponse): KlipyApiItem[] => {
   return [];
 };
 
-export async function searchKlipyGifs(input: GifSearchInput): Promise<{ items: GifSearchItem[] }> {
-  const apiKey = process.env.KLIPY_API_KEY;
-  if (!apiKey) throw new Error("KLIPY_API_KEY is not configured");
-
-  const endpoint = input.q.trim() ? "search" : "trending";
+async function fetchKlipy(
+  apiKey: string,
+  endpoint: "search" | "trending",
+  q: string,
+  safeCustomer: string,
+  page: number,
+): Promise<GifSearchItem[]> {
   const params = new URLSearchParams({
-    customer_id: input.customerId,
-    page: String(input.page),
+    customer_id: safeCustomer,
+    page: String(page),
     per_page: "24",
   });
-  if (input.q.trim()) params.set("q", input.q.trim());
+  if (q) params.set("q", q);
 
   const response = await fetch(
     `https://api.klipy.com/api/v1/${encodeURIComponent(apiKey)}/gifs/${endpoint}?${params}`,
@@ -65,11 +67,16 @@ export async function searchKlipyGifs(input: GifSearchInput): Promise<{ items: G
   );
 
   if (!response.ok) {
-    throw new Error(`KLIPY request failed [${response.status}]: ${await response.text()}`);
+    const body = await response.text();
+    console.error("[KLIPY] HTTP", response.status, body.slice(0, 300));
+    return [];
   }
 
-  const payload = (await response.json()) as KlipyApiResponse;
-  if (payload.result === false) throw new Error("KLIPY returned an unsuccessful response");
+  const payload = (await response.json()) as KlipyApiResponse & { errors?: unknown };
+  if (payload.result === false) {
+    console.error("[KLIPY] Unsuccessful response", JSON.stringify(payload.errors));
+    return [];
+  }
 
   const previewPaths = [
     ["md", "webp", "url"],
@@ -87,7 +94,7 @@ export async function searchKlipyGifs(input: GifSearchInput): Promise<{ items: G
     ["md", "webp", "url"],
   ];
 
-  const items = normalizeItems(payload)
+  return normalizeItems(payload)
     .map((item) => {
       const file = item.file ?? {};
       const preview = firstUrl(file, previewPaths);
@@ -97,6 +104,25 @@ export async function searchKlipyGifs(input: GifSearchInput): Promise<{ items: G
         : null;
     })
     .filter((item): item is GifSearchItem => item !== null);
+}
 
+export async function searchKlipyGifs(input: GifSearchInput): Promise<{ items: GifSearchItem[] }> {
+  const apiKey = process.env.KLIPY_API_KEY;
+  if (!apiKey) throw new Error("KLIPY_API_KEY is not configured");
+
+  const query = input.q.trim();
+  const safeCustomer =
+    (input.customerId || "anon").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "anon";
+
+  if (query) {
+    const items = await fetchKlipy(apiKey, "search", query, safeCustomer, input.page);
+    return { items };
+  }
+
+  // Empty query: try trending first, fall back to a popular search so the tab is never empty.
+  let items = await fetchKlipy(apiKey, "trending", "", safeCustomer, input.page);
+  if (items.length === 0) {
+    items = await fetchKlipy(apiKey, "search", "funny", safeCustomer, 1);
+  }
   return { items };
 }

@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { RealtimeChannel, User } from "@supabase/supabase-js";
 import { useServerFn } from "@tanstack/react-start";
 import { Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { lockGate } from "@/lib/gate.functions";
+import { deleteConversationMessages, deleteMessageById } from "@/lib/messages.functions";
 import { QuickExit } from "./QuickExit";
-import { MessageList, type ChatMessage } from "./MessageList";
-import { Composer } from "./Composer";
+import { MessageList, type ChatMessage, type Reaction } from "./MessageList";
+import { Composer, type ReplyTarget } from "./Composer";
 import { ChatList } from "./ChatList";
 import { subscribeToPush } from "@/lib/push-client";
 
@@ -22,63 +23,22 @@ function formatLastSeen(iso: string | null): string {
   return `last seen at ${hh}:${mm}`;
 }
 
-
 export function ChatRoom() {
   const lock = useServerFn(lockGate);
+  const deleteAll = useServerFn(deleteConversationMessages);
+  const deleteOne = useServerFn(deleteMessageById);
+
   const [user, setUser] = useState<User | null>(null);
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [reactions, setReactions] = useState<Reaction[]>([]);
   const [peerTyping, setPeerTyping] = useState(false);
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(0);
-  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
-  const [clearedAt, setClearedAt] = useState<number>(0);
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [ready, setReady] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
-
-  const hiddenKey = user ? `chat:hidden:${user.id}` : null;
-  const clearedKey = user ? `chat:clearedAt:${user.id}` : null;
-
-  // Load per-user local hide state
-  useEffect(() => {
-    if (!hiddenKey || !clearedKey) return;
-    try {
-      const h = JSON.parse(localStorage.getItem(hiddenKey) || "[]") as string[];
-      setHiddenIds(new Set(h));
-      const c = Number(localStorage.getItem(clearedKey) || "0");
-      setClearedAt(c);
-    } catch {
-      // ignore
-    }
-  }, [hiddenKey, clearedKey]);
-
-  const visibleMessages = useMemo(
-    () =>
-      messages.filter(
-        (m) => !hiddenIds.has(m.id) && new Date(m.created_at).getTime() > clearedAt,
-      ),
-    [messages, hiddenIds, clearedAt],
-  );
-
-  function hideMessage(id: string) {
-    setHiddenIds((prev) => {
-      const next = new Set(prev);
-      next.add(id);
-      if (hiddenKey) localStorage.setItem(hiddenKey, JSON.stringify([...next]));
-      return next;
-    });
-  }
-
-  function clearAll() {
-    if (!clearedKey || !hiddenKey) return;
-    const now = Date.now();
-    localStorage.setItem(clearedKey, String(now));
-    localStorage.setItem(hiddenKey, "[]");
-    setClearedAt(now);
-    setHiddenIds(new Set());
-  }
-
-
 
   useEffect(() => {
     let mounted = true;
@@ -105,9 +65,10 @@ export function ChatRoom() {
         return (msgs ?? []) as ChatMessage[];
       }
 
-      const [{ data: profs }, msgs] = await Promise.all([
+      const [{ data: profs }, msgs, { data: rx }] = await Promise.all([
         supabase.from("profiles").select("id, display_name, avatar_url, last_seen_at"),
         loadMessages(),
+        supabase.from("message_reactions").select("id, message_id, user_id, emoji"),
       ]);
       if (!mounted) return;
       const map: Record<string, Profile> = {};
@@ -116,7 +77,8 @@ export function ChatRoom() {
       const peer = (profs ?? []).find((p) => p.id !== data.user?.id) as Profile | undefined;
       if (peer?.last_seen_at) setPeerLastSeen(peer.last_seen_at);
       setMessages(msgs);
-
+      setReactions((rx ?? []) as Reaction[]);
+      setReady(true);
 
       if (data.user) {
         subscribeToPush(data.user.id).catch(() => {});
@@ -127,9 +89,6 @@ export function ChatRoom() {
     };
   }, []);
 
-  // Auto-exit: if the tab is hidden (minimized, switched away, closed),
-  // lock the access-code gate and go home. Supabase session is preserved,
-  // so re-entering the code lands the user straight back in chat.
   useEffect(() => {
     function autoExit() {
       lock().catch(() => {});
@@ -146,13 +105,11 @@ export function ChatRoom() {
     };
   }, [lock]);
 
-  // Tick every 30s so the "last seen X min ago" label stays fresh.
   useEffect(() => {
     const t = window.setInterval(() => setNowTick((n) => n + 1), 30_000);
     return () => window.clearInterval(t);
   }, []);
 
-  // Heartbeat: update our own last_seen_at every 30s while chat is open.
   useEffect(() => {
     if (!user) return;
     const beat = () => {
@@ -166,7 +123,6 @@ export function ChatRoom() {
     const t = window.setInterval(beat, 30_000);
     return () => window.clearInterval(t);
   }, [user]);
-
 
   useEffect(() => {
     if (!user) return;
@@ -193,6 +149,49 @@ export function ChatRoom() {
         (payload) => {
           const m = payload.new as ChatMessage;
           setMessages((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "messages", filter: `conversation_id=eq.${CONVERSATION_ID}` },
+        (payload) => {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (!oldId) {
+            // Full clear or missing id: refetch
+            supabase
+              .from("messages")
+              .select("*")
+              .eq("conversation_id", CONVERSATION_ID)
+              .order("created_at", { ascending: true })
+              .limit(500)
+              .then(({ data }) => setMessages((data ?? []) as ChatMessage[]));
+            return;
+          }
+          setMessages((prev) => prev.filter((x) => x.id !== oldId));
+          setReactions((prev) => prev.filter((r) => r.message_id !== oldId));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "message_reactions" },
+        (payload) => {
+          const r = payload.new as Reaction;
+          setReactions((prev) => (prev.some((x) => x.id === r.id) ? prev : [...prev, r]));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "message_reactions" },
+        (payload) => {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (!oldId) {
+            supabase
+              .from("message_reactions")
+              .select("id, message_id, user_id, emoji")
+              .then(({ data }) => setReactions((data ?? []) as Reaction[]));
+            return;
+          }
+          setReactions((prev) => prev.filter((r) => r.id !== oldId));
         },
       )
       .on("broadcast", { event: "typing" }, (payload) => {
@@ -227,7 +226,6 @@ export function ChatRoom() {
         }
       });
 
-
     supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
@@ -254,7 +252,6 @@ export function ChatRoom() {
       .then(() => {});
   }, [messages, user]);
 
-  // Header label based on current user's email
   const email = user?.email ?? "";
   const assistantName = email.startsWith("bf@") ? "GPT Assistant" : "Gemini Assistant";
   const assistantInitial = email.startsWith("bf@") ? "G" : "G";
@@ -262,8 +259,7 @@ export function ChatRoom() {
     ? "from-emerald-400 to-teal-500"
     : "from-blue-400 via-purple-500 to-pink-500";
 
-  // Last message preview + unread count for the sidebar (respect local hides)
-  const lastMsg = visibleMessages[visibleMessages.length - 1];
+  const lastMsg = messages[messages.length - 1];
   const lastMessagePreview = lastMsg
     ? lastMsg.voice_path
       ? "🎤 Voice message"
@@ -277,17 +273,109 @@ export function ChatRoom() {
     ? new Date(lastMsg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "";
   const unreadCount = user
-    ? visibleMessages.filter((m) => m.sender_id !== user.id && !m.read_at).length
+    ? messages.filter((m) => m.sender_id !== user.id && !m.read_at).length
     : 0;
 
-  function onClearChat() {
-    if (typeof window !== "undefined" && window.confirm("Delete this chat from your view? Messages stay for the other person.")) {
-      clearAll();
+  async function onClearChat() {
+    if (typeof window === "undefined") return;
+    if (!window.confirm("Delete the entire chat for both of you? This cannot be undone.")) return;
+    try {
+      await deleteAll({ data: { conversationId: CONVERSATION_ID } });
+      setMessages([]);
+      setReactions([]);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete chat. Try again.");
+    }
+  }
+
+  async function onDeleteMessage(m: ChatMessage) {
+    if (typeof window === "undefined") return;
+    if (!window.confirm("Delete this message for everyone?")) return;
+    // Optimistic remove
+    setMessages((prev) => prev.filter((x) => x.id !== m.id));
+    setReactions((prev) => prev.filter((r) => r.message_id !== m.id));
+    try {
+      if (user && m.sender_id === user.id) {
+        const { error } = await supabase.from("messages").delete().eq("id", m.id);
+        if (error) throw error;
+      } else {
+        await deleteOne({ data: { messageId: m.id } });
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete message.");
+    }
+  }
+
+  function onReply(m: ChatMessage) {
+    const senderName = profiles[m.sender_id]?.display_name ?? "Message";
+    let preview = "";
+    if (m.media_kind === "gif") preview = "GIF";
+    else if (m.voice_path) preview = "🎤 Voice message";
+    else if (m.media_path) preview = m.media_kind?.startsWith("video/") ? "🎬 Video" : "📷 Photo";
+    else preview = m.body ?? "";
+    setReplyTarget({ id: m.id, senderName, preview });
+  }
+
+  async function onEditMessage(m: ChatMessage) {
+    if (typeof window === "undefined" || !user) return;
+    if (m.sender_id !== user.id) return;
+    if (m.media_path || m.voice_path || m.media_kind === "gif") return;
+    const next = window.prompt("Edit message", m.body ?? "");
+    if (next == null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === (m.body ?? "")) return;
+    const nowIso = new Date().toISOString();
+    setMessages((prev) =>
+      prev.map((x) => (x.id === m.id ? { ...x, body: trimmed, edited_at: nowIso } : x)),
+    );
+    const { error } = await supabase
+      .from("messages")
+      .update({ body: trimmed, edited_at: nowIso })
+      .eq("id", m.id);
+    if (error) {
+      console.error(error);
+      alert("Failed to edit message.");
+    }
+  }
+
+
+
+  async function onToggleReaction(messageId: string, emoji: string) {
+    if (!user) return;
+    const existing = reactions.find(
+      (r) => r.message_id === messageId && r.user_id === user.id && r.emoji === emoji,
+    );
+    if (existing) {
+      setReactions((prev) => prev.filter((r) => r.id !== existing.id));
+      await supabase.from("message_reactions").delete().eq("id", existing.id);
+    } else {
+      const optimistic: Reaction = {
+        id: `tmp-${crypto.randomUUID()}`,
+        message_id: messageId,
+        user_id: user.id,
+        emoji,
+      };
+      setReactions((prev) => [...prev, optimistic]);
+      const { data, error } = await supabase
+        .from("message_reactions")
+        .insert({ message_id: messageId, user_id: user.id, emoji })
+        .select("id, message_id, user_id, emoji")
+        .single();
+      if (error) {
+        setReactions((prev) => prev.filter((r) => r.id !== optimistic.id));
+      } else if (data) {
+        setReactions((prev) => prev.map((r) => (r.id === optimistic.id ? (data as Reaction) : r)));
+      }
     }
   }
 
   return (
     <div className="flex h-[100dvh] w-full bg-[#0a0a0a] text-slate-100">
+      {!ready && (
+        <div className="fixed inset-0 z-50 bg-[#0a0a0a]" aria-hidden="true" />
+      )}
       <ChatList
         peerName={assistantName}
         peerInitial={assistantInitial}
@@ -329,8 +417,8 @@ export function ChatRoom() {
             <button
               type="button"
               onClick={onClearChat}
-              aria-label="Clear chat for me"
-              title="Clear chat for me"
+              aria-label="Delete entire chat"
+              title="Delete entire chat"
               className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-rose-300 active:scale-95"
             >
               <Trash2 className="h-[18px] w-[18px]" />
@@ -341,7 +429,16 @@ export function ChatRoom() {
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col lg:mx-auto lg:w-full lg:max-w-[880px]">
-            <MessageList messages={visibleMessages} currentUserId={user?.id ?? null} profiles={profiles} onHideMessage={hideMessage} />
+            <MessageList
+              messages={messages}
+              currentUserId={user?.id ?? null}
+              profiles={profiles}
+              reactions={reactions}
+              onReply={onReply}
+              onDelete={onDeleteMessage}
+              onEdit={onEditMessage}
+              onToggleReaction={onToggleReaction}
+            />
 
             <Composer
               currentUserId={user?.id ?? null}
@@ -353,6 +450,8 @@ export function ChatRoom() {
                   payload: { userId: user?.id },
                 });
               }}
+              replyTarget={replyTarget}
+              onClearReply={() => setReplyTarget(null)}
             />
           </div>
         </div>
