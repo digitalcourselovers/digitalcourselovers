@@ -2,11 +2,17 @@ import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { lockGate } from "@/lib/gate.functions";
 
-export function QuickExit() {
+export function QuickExit({ onBeforeExit }: { onBeforeExit?: () => void } = {}) {
   const [going, setGoing] = useState(false);
   const lock = useServerFn(lockGate);
 
   function exit() {
+    // Tear down any active call first (stops camera/mic instantly)
+    try {
+      onBeforeExit?.();
+    } catch {
+      /* noop */
+    }
     // Immediately hide UI
     setGoing(true);
     // Lock the access-code gate (session stays signed in on this device)
@@ -20,7 +26,7 @@ export function QuickExit() {
       <button
         onClick={exit}
         aria-label="Quick exit"
-        className="rounded-xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:bg-red-500 active:scale-95 transition sm:px-6 sm:py-3 sm:text-base"
+        className="shrink-0 whitespace-nowrap rounded-2xl bg-red-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-md transition hover:bg-red-500 active:scale-95 sm:px-5 sm:py-2.5 sm:text-[14px]"
       >
         Quick exit
       </button>

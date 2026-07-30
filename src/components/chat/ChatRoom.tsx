@@ -1,17 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel, User } from "@supabase/supabase-js";
 import { useServerFn } from "@tanstack/react-start";
-import { Trash2 } from "lucide-react";
+import { Trash2, Phone, Video } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { lockGate } from "@/lib/gate.functions";
 import { deleteConversationMessages, deleteMessageById } from "@/lib/messages.functions";
+import { notifyPeer } from "@/lib/push.functions";
 import { QuickExit } from "./QuickExit";
-import { MessageList, type ChatMessage, type Reaction } from "./MessageList";
+import { MessageList, type ChatMessage, type Reaction, type CallLog } from "./MessageList";
 import { Composer, type ReplyTarget } from "./Composer";
 import { ChatList } from "./ChatList";
 import { subscribeToPush } from "@/lib/push-client";
+import { useCall, type CallSignal } from "@/lib/webrtc/useCall";
+import { CallOverlay } from "./call/CallOverlay";
 
 const CONVERSATION_ID = "00000000-0000-0000-0000-000000000001";
+const HIDDEN_KEY = "chat.hidden.ids";
 
 type Profile = { id: string; display_name: string; avatar_url: string | null; last_seen_at?: string | null };
 
@@ -27,18 +31,55 @@ export function ChatRoom() {
   const lock = useServerFn(lockGate);
   const deleteAll = useServerFn(deleteConversationMessages);
   const deleteOne = useServerFn(deleteMessageById);
+  const notify = useServerFn(notifyPeer);
 
   const [user, setUser] = useState<User | null>(null);
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [calls, setCalls] = useState<CallLog[]>([]);
   const [reactions, setReactions] = useState<Reaction[]>([]);
   const [peerTyping, setPeerTyping] = useState(false);
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(0);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [hiddenIds, setHiddenIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(HIDDEN_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [ready, setReady] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
+
+  const peerId = useMemo(
+    () => Object.keys(profiles).find((id) => id !== user?.id) ?? null,
+    [profiles, user],
+  );
+
+  const sendSignal = useCallback((signal: CallSignal) => {
+    channelRef.current?.send({ type: "broadcast", event: "call", payload: signal });
+  }, []);
+
+  const call = useCall({
+    userId: user?.id ?? null,
+    peerId,
+    conversationId: CONVERSATION_ID,
+    sendSignal,
+    onIncomingPing: () => {
+      notify({ data: { conversationId: CONVERSATION_ID } }).catch(() => {});
+    },
+  });
+
+  const callSignalRef = useRef(call.handleSignal);
+  callSignalRef.current = call.handleSignal;
+  const callActiveRef = useRef(call.active);
+  callActiveRef.current = call.active;
+
 
   useEffect(() => {
     let mounted = true;
@@ -65,10 +106,16 @@ export function ChatRoom() {
         return (msgs ?? []) as ChatMessage[];
       }
 
-      const [{ data: profs }, msgs, { data: rx }] = await Promise.all([
+      const [{ data: profs }, msgs, { data: rx }, { data: callRows }] = await Promise.all([
         supabase.from("profiles").select("id, display_name, avatar_url, last_seen_at"),
         loadMessages(),
         supabase.from("message_reactions").select("id, message_id, user_id, emoji"),
+        supabase
+          .from("calls")
+          .select("id, caller_id, callee_id, kind, status, started_at, answered_at, ended_at, duration_ms")
+          .eq("conversation_id", CONVERSATION_ID)
+          .order("started_at", { ascending: true })
+          .limit(200),
       ]);
       if (!mounted) return;
       const map: Record<string, Profile> = {};
@@ -78,6 +125,7 @@ export function ChatRoom() {
       if (peer?.last_seen_at) setPeerLastSeen(peer.last_seen_at);
       setMessages(msgs);
       setReactions((rx ?? []) as Reaction[]);
+      setCalls((callRows ?? []) as CallLog[]);
       setReady(true);
 
       if (data.user) {
@@ -91,6 +139,8 @@ export function ChatRoom() {
 
   useEffect(() => {
     function autoExit() {
+      // Never bail out of an active call when the tab is hidden/minimised.
+      if (callActiveRef.current) return;
       lock().catch(() => {});
       window.location.replace("/");
     }
@@ -194,6 +244,38 @@ export function ChatRoom() {
           setReactions((prev) => prev.filter((r) => r.id !== oldId));
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "calls", filter: `conversation_id=eq.${CONVERSATION_ID}` },
+        (payload) => {
+          const c = payload.new as CallLog;
+          setCalls((prev) => (prev.some((x) => x.id === c.id) ? prev : [...prev, c]));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "calls", filter: `conversation_id=eq.${CONVERSATION_ID}` },
+        (payload) => {
+          const c = payload.new as CallLog;
+          setCalls((prev) => (prev.some((x) => x.id === c.id) ? prev.map((x) => (x.id === c.id ? c : x)) : [...prev, c]));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "calls" },
+        (payload) => {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (!oldId) {
+            setCalls([]);
+            return;
+          }
+          setCalls((prev) => prev.filter((x) => x.id !== oldId));
+        },
+      )
+      .on("broadcast", { event: "call" }, (payload) => {
+        const signal = payload.payload as CallSignal | undefined;
+        if (signal?.type) void callSignalRef.current(signal);
+      })
       .on("broadcast", { event: "typing" }, (payload) => {
         if (payload.payload?.userId && payload.payload.userId !== user.id) {
           setPeerTyping(true);
@@ -276,6 +358,29 @@ export function ChatRoom() {
     ? messages.filter((m) => m.sender_id !== user.id && !m.read_at).length
     : 0;
 
+    const activeCallId = call.state.callId;
+    const visibleMessages = useMemo(
+    () => messages.filter((m) => !hiddenIds.includes(m.id)),
+    [messages, hiddenIds],
+  );
+  const visibleCalls = useMemo(
+    () => calls.filter((c) => c.id !== activeCallId && !hiddenIds.includes(c.id)),
+    [calls, activeCallId, hiddenIds],
+  );
+
+  function hideLocally(id: string) {
+    setHiddenIds((prev) => {
+      if (prev.includes(id)) return prev;
+      const next = [...prev, id];
+      try {
+        window.localStorage.setItem(HIDDEN_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+
   async function onClearChat() {
     if (typeof window === "undefined") return;
     if (!window.confirm("Delete the entire chat for both of you? This cannot be undone.")) return;
@@ -283,9 +388,31 @@ export function ChatRoom() {
       await deleteAll({ data: { conversationId: CONVERSATION_ID } });
       setMessages([]);
       setReactions([]);
+      setCalls([]);
     } catch (e) {
       console.error(e);
       alert("Failed to delete chat. Try again.");
+    }
+  }
+
+  function onDeleteMessageForMe(m: ChatMessage) {
+    hideLocally(m.id);
+  }
+
+  function onDeleteCallForMe(c: CallLog) {
+    hideLocally(c.id);
+  }
+
+  async function onDeleteCall(c: CallLog) {
+    if (typeof window === "undefined") return;
+    if (!window.confirm("Delete this call log for everyone?")) return;
+    setCalls((prev) => prev.filter((x) => x.id !== c.id));
+    try {
+      const { error } = await supabase.from("calls").delete().eq("id", c.id);
+      if (error) throw error;
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete call log.");
     }
   }
 
@@ -307,6 +434,7 @@ export function ChatRoom() {
       alert("Failed to delete message.");
     }
   }
+
 
   function onReply(m: ChatMessage) {
     const senderName = profiles[m.sender_id]?.display_name ?? "Message";
@@ -371,6 +499,11 @@ export function ChatRoom() {
     }
   }
 
+  function startCallWithPing(kind: "voice" | "video") {
+    void call.startCall(kind);
+    notify({ data: { conversationId: CONVERSATION_ID } }).catch(() => {});
+  }
+
   return (
     <div className="flex h-[100dvh] w-full bg-[#0a0a0a] text-slate-100">
       {!ready && (
@@ -387,25 +520,27 @@ export function ChatRoom() {
       />
 
       <div className="flex h-full min-w-0 flex-1 flex-col bg-[#0f0f0f]">
-        <header className="flex items-center justify-between border-b border-white/5 bg-[#171717] px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br ${gradient} text-sm font-bold text-white shadow`}>
+        <header className="flex items-center justify-between gap-2 border-b border-white/5 bg-[#171717] px-2.5 py-3 sm:px-4 sm:py-3.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full bg-gradient-to-br ${gradient} text-base font-bold text-white shadow`}>
               {assistantInitial}
             </div>
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold tracking-tight">{assistantName}</div>
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+              <div className="truncate text-[13px] font-semibold leading-tight tracking-tight sm:text-sm">
+                {assistantName}
+              </div>
+              <div className="flex items-center gap-1.5 whitespace-nowrap text-[11px] leading-tight text-slate-400">
                 {peerTyping ? (
                   <span className="text-rose-300">typing…</span>
                 ) : peerOnline ? (
                   <>
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
                     <span>Online</span>
                   </>
                 ) : (
                   <>
-                    <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
-                    <span className="truncate">{formatLastSeen(peerLastSeen)}</span>
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-500" />
+                    <span>{formatLastSeen(peerLastSeen)}</span>
                     <span className="hidden">{nowTick}</span>
                   </>
                 )}
@@ -413,29 +548,54 @@ export function ChatRoom() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-0.5 sm:gap-1.5">
+            <button
+              type="button"
+              onClick={() => startCallWithPing("voice")}
+              disabled={!peerId || call.active}
+              aria-label="Voice call"
+              title="Voice call"
+              className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-emerald-300 active:scale-95 disabled:opacity-40 sm:h-10 sm:w-10"
+            >
+              <Phone className="h-[18px] w-[18px] sm:h-5 sm:w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => startCallWithPing("video")}
+              disabled={!peerId || call.active}
+              aria-label="Video call"
+              title="Video call"
+              className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-emerald-300 active:scale-95 disabled:opacity-40 sm:h-10 sm:w-10"
+            >
+              <Video className="h-[18px] w-[18px] sm:h-5 sm:w-5" />
+            </button>
             <button
               type="button"
               onClick={onClearChat}
               aria-label="Delete entire chat"
               title="Delete entire chat"
-              className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-rose-300 active:scale-95"
+              className="grid h-9 w-9 place-items-center rounded-lg text-slate-400 transition hover:bg-white/5 hover:text-rose-300 active:scale-95 sm:h-10 sm:w-10"
             >
-              <Trash2 className="h-[18px] w-[18px]" />
+              <Trash2 className="h-[18px] w-[18px] sm:h-5 sm:w-5" />
             </button>
-            <QuickExit />
+            <QuickExit onBeforeExit={() => call.hangup()} />
           </div>
         </header>
+
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col lg:mx-auto lg:w-full lg:max-w-[880px]">
             <MessageList
-              messages={messages}
+              messages={visibleMessages}
+              calls={visibleCalls}
               currentUserId={user?.id ?? null}
               profiles={profiles}
               reactions={reactions}
               onReply={onReply}
               onDelete={onDeleteMessage}
+              onDeleteForMe={onDeleteMessageForMe}
+              onDeleteCall={onDeleteCall}
+              onDeleteCallForMe={onDeleteCallForMe}
               onEdit={onEditMessage}
               onToggleReaction={onToggleReaction}
             />
@@ -456,6 +616,24 @@ export function ChatRoom() {
           </div>
         </div>
       </div>
+
+      <CallOverlay
+        state={call.state}
+        localStream={call.localStream}
+        remoteStream={call.remoteStream}
+        hasMultipleCameras={call.hasMultipleCameras}
+        peerName={assistantName}
+        peerInitial={assistantInitial}
+        gradient={gradient}
+        onAccept={call.accept}
+        onDecline={call.decline}
+        onHangup={call.hangup}
+        onToggleMute={call.toggleMute}
+        onToggleCamera={call.toggleCamera}
+        onSwitchCamera={call.switchCamera}
+        onClearError={call.clearError}
+      />
     </div>
+
   );
 }

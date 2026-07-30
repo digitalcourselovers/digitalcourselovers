@@ -142,7 +142,7 @@ export function VoiceRecorder({
         <button
           type="button"
           onClick={() => finish(true)}
-          className="grid h-9 w-9 place-items-center rounded-full bg-slate-700 text-white hover:bg-slate-600"
+          className="grid h-10 w-10 place-items-center rounded-full bg-slate-700 text-white hover:bg-slate-600"
           aria-label="Cancel"
         >
           ✕
@@ -151,7 +151,7 @@ export function VoiceRecorder({
         <button
           type="button"
           onClick={() => finish(false)}
-          className="grid h-9 w-9 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400"
+          className="grid h-10 w-10 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400"
           aria-label="Send voice"
         >
           ➤
@@ -165,7 +165,7 @@ export function VoiceRecorder({
       type="button"
       onClick={start}
       disabled={disabled}
-      className="grid h-9 w-9 place-items-center rounded-full text-slate-300 hover:bg-white/10 disabled:opacity-50"
+      className="grid h-10 w-10 place-items-center rounded-full text-slate-300 hover:bg-white/10 disabled:opacity-50"
       aria-label="Record voice"
     >
       🎤

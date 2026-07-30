@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Reply, Copy, Trash2, CornerUpLeft, Pencil, Plus } from "lucide-react";
+import { ChevronDown, Reply, Copy, Trash2, CornerUpLeft, Pencil, Plus, Video, PhoneCall, PhoneMissed, PhoneOutgoing, PhoneIncoming } from "lucide-react";
 const EmojiPicker = lazy(() => import("@emoji-mart/react"));
 import emojiData from "@emoji-mart/data";
 import { supabase } from "@/integrations/supabase/client";
@@ -26,31 +26,52 @@ export type Reaction = {
   emoji: string;
 };
 
+export type CallLog = {
+  id: string;
+  caller_id: string;
+  callee_id: string;
+  kind: string;
+  status: string;
+  started_at: string;
+  answered_at?: string | null;
+  ended_at?: string | null;
+  duration_ms: number | null;
+};
+
 type Profile = { id: string; display_name: string; avatar_url: string | null };
 
 const QUICK_REACTIONS = ["❤️", "😂", "😮", "😢", "🙏", "👍"];
 
 export function MessageList({
   messages,
+  calls = [],
   currentUserId,
   profiles,
   reactions,
   onReply,
   onDelete,
+  onDeleteForMe,
+  onDeleteCall,
+  onDeleteCallForMe,
   onEdit,
   onToggleReaction,
 }: {
   messages: ChatMessage[];
+  calls?: CallLog[];
   currentUserId: string | null;
   profiles: Record<string, Profile>;
   reactions: Reaction[];
   onReply: (m: ChatMessage) => void;
   onDelete: (m: ChatMessage) => void;
+  onDeleteForMe: (m: ChatMessage) => void;
+  onDeleteCall: (c: CallLog) => void;
+  onDeleteCallForMe: (c: CallLog) => void;
   onEdit: (m: ChatMessage) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [callMenuId, setCallMenuId] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const pressTimer = useRef<number | null>(null);
   const [showJump, setShowJump] = useState(false);
@@ -79,6 +100,19 @@ export function MessageList({
     }
     return map;
   }, [reactions]);
+
+  type Item =
+    | { k: "m"; t: string; m: ChatMessage }
+    | { k: "c"; t: string; c: CallLog };
+
+  const items = useMemo<Item[]>(() => {
+    const arr: Item[] = messages.map((m) => ({ k: "m" as const, t: m.created_at, m }));
+    for (const c of calls) arr.push({ k: "c" as const, t: c.started_at, c });
+    arr.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+    return arr;
+  }, [messages, calls]);
+
+
 
   function startPress(id: string) {
     if (pressTimer.current) window.clearTimeout(pressTimer.current);
@@ -114,7 +148,7 @@ export function MessageList({
       return;
     }
     if (isNearBottom()) scrollToBottom(true);
-  }, [messages]);
+  }, [messages, calls]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -161,15 +195,53 @@ export function MessageList({
   }
 
   const activeMenuMsg = menuId ? messagesById[menuId] ?? null : null;
+  const activeMenuCall = callMenuId ? calls.find((c) => c.id === callMenuId) ?? null : null;
+
+  function startCallPress(id: string) {
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    pressTimer.current = window.setTimeout(() => {
+      setCallMenuId(id);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 450);
+  }
 
   return (
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollRef} className="chat-scroll h-full overflow-y-auto px-3 py-4 sm:px-4">
         <div className="mx-auto flex w-full flex-col gap-2">
-          {messages.map((m, i) => {
+          {items.map((item, i) => {
+            const prevItem = items[i - 1];
+            const showDayLine = !prevItem || dayStr(prevItem.t) !== dayStr(item.t);
+            if (item.k === "c") {
+              return (
+                <div key={`call-${item.c.id}`}>
+                  {showDayLine && (
+                    <div className="my-4 flex items-center justify-center">
+                      <span className="rounded-full bg-white/5 px-3 py-1 text-[11px] text-slate-400">
+                        {friendlyDay(item.t)}
+                      </span>
+                    </div>
+                  )}
+                  <div
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCallMenuId(item.c.id);
+                    }}
+                    onPointerDown={(e) => {
+                      if (e.pointerType !== "mouse") startCallPress(item.c.id);
+                    }}
+                    onPointerUp={cancelPress}
+                    onPointerLeave={cancelPress}
+                    onPointerCancel={cancelPress}
+                  >
+                    <CallLogRow call={item.c} currentUserId={currentUserId} />
+                  </div>
+                </div>
+              );
+            }
+            const m = item.m;
             const mine = m.sender_id === currentUserId;
-            const prev = messages[i - 1];
-            const showDay = !prev || dayStr(prev.created_at) !== dayStr(m.created_at);
+            const showDay = showDayLine;
             const replyTo = m.reply_to_id ? messagesById[m.reply_to_id] : null;
             const rxs = reactionsByMsg[m.id] ?? [];
             const rxGrouped = groupReactions(rxs);
@@ -270,7 +342,7 @@ export function MessageList({
               </div>
             );
           })}
-          {messages.length === 0 && (
+          {items.length === 0 && (
             <div className="mt-20 text-center text-sm text-slate-500">Say something.</div>
           )}
         </div>
@@ -365,7 +437,17 @@ export function MessageList({
               )}
             <MenuItem
               icon={<Trash2 className="h-4 w-4" />}
-              label="Delete"
+              label="Delete for me"
+              danger
+              onClick={() => {
+                const target = activeMenuMsg;
+                setMenuId(null);
+                onDeleteForMe(target);
+              }}
+            />
+            <MenuItem
+              icon={<Trash2 className="h-4 w-4" />}
+              label="Delete for everyone"
               danger
               onClick={() => {
                 const target = activeMenuMsg;
@@ -383,6 +465,50 @@ export function MessageList({
           </div>
         </div>
       )}
+
+      {activeMenuCall && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 sm:items-center"
+          onClick={() => setCallMenuId(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mb-4 w-[calc(100%-2rem)] max-w-xs overflow-hidden rounded-2xl bg-[#1f1f1f] shadow-2xl ring-1 ring-white/10"
+          >
+            <div className="px-4 py-3 text-xs uppercase tracking-wide text-slate-500">
+              {activeMenuCall.kind === "video" ? "Video call" : "Voice call"}
+            </div>
+            <MenuItem
+              icon={<Trash2 className="h-4 w-4" />}
+              label="Delete for me"
+              danger
+              onClick={() => {
+                const target = activeMenuCall;
+                setCallMenuId(null);
+                onDeleteCallForMe(target);
+              }}
+            />
+            <MenuItem
+              icon={<Trash2 className="h-4 w-4" />}
+              label="Delete for everyone"
+              danger
+              onClick={() => {
+                const target = activeMenuCall;
+                setCallMenuId(null);
+                onDeleteCall(target);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => setCallMenuId(null)}
+              className="block w-full border-t border-white/5 px-4 py-3 text-left text-sm text-slate-300 hover:bg-white/5"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
 
       {showJump && (
         <button
@@ -537,4 +663,73 @@ function friendlyDay(iso: string) {
   if (dayStr(iso) === dayStr(today.toISOString())) return "Today";
   if (dayStr(iso) === dayStr(yest.toISOString())) return "Yesterday";
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+
+function CallLogRow({ call, currentUserId }: { call: CallLog; currentUserId: string | null }) {
+  const outgoing = call.caller_id === currentUserId;
+  const isVideo = call.kind === "video";
+  const fallbackMs =
+    call.answered_at && call.ended_at
+      ? new Date(call.ended_at).getTime() - new Date(call.answered_at).getTime()
+      : 0;
+  const ms = call.duration_ms ?? fallbackMs;
+  const secs = ms > 0 ? Math.round(ms / 1000) : 0;
+  const answered = Boolean(call.answered_at) || secs > 0 || call.status === "ended";
+  const declined = call.status === "declined" || call.status === "rejected";
+  const missed = !answered && !declined;
+  const unanswered = missed || declined;
+
+  let subText: string;
+  if (declined) subText = "Rejected";
+  else if (missed) subText = outgoing ? "No answer" : "Missed call";
+  else subText = secs > 0 ? formatCallDuration(secs) : "Call ended";
+
+  const time = new Date(call.started_at).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const Arrow = unanswered ? PhoneMissed : outgoing ? PhoneOutgoing : PhoneIncoming;
+
+  return (
+    <div className={`flex ${outgoing ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`flex min-w-[190px] max-w-[75%] items-center gap-3 rounded-2xl px-3 py-2.5 shadow-sm ${
+          outgoing ? "rounded-br-md bg-rose-500/90" : "rounded-bl-md bg-[#1f1f1f]"
+        }`}
+      >
+        <span className="relative grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/10">
+          {isVideo ? (
+            <Video className={`h-4 w-4 ${unanswered ? "text-rose-300" : "text-slate-100"}`} />
+          ) : (
+            <PhoneCall className={`h-4 w-4 ${unanswered ? "text-rose-300" : "text-slate-100"}`} />
+          )}
+          <Arrow
+            className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-[#1f1f1f] p-[1px] ${
+              unanswered ? "text-rose-400" : "text-emerald-400"
+            }`}
+          />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className={`text-sm font-semibold ${outgoing ? "text-white" : "text-slate-100"}`}>
+            {isVideo ? "Video call" : "Voice call"}
+          </div>
+          <div className={`text-[13px] ${unanswered ? "text-rose-300" : outgoing ? "text-rose-50/90" : "text-slate-400"}`}>
+            {subText}
+          </div>
+        </div>
+        <span className={`self-end text-[10px] ${outgoing ? "text-rose-100/80" : "text-slate-500"}`}>{time}</span>
+      </div>
+    </div>
+  );
+}
+
+
+function formatCallDuration(total: number) {
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h} hr ${m} min`;
+  if (m > 0) return `${m} min ${s} sec`;
+  return `${s} sec`;
 }

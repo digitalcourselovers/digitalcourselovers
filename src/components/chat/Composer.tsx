@@ -154,7 +154,7 @@ export function Composer({
         <button
           type="button"
           onClick={() => setShowPicker((s) => !s)}
-          className="grid h-9 w-9 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
+          className="grid h-10 w-10 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
           aria-label="Emoji and GIF"
         >
           😊
@@ -163,7 +163,7 @@ export function Composer({
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
-          className="grid h-9 w-9 place-items-center rounded-full text-slate-300 hover:bg-white/10"
+          className="grid h-10 w-10 place-items-center rounded-full text-slate-300 hover:bg-white/10"
           aria-label="Attach"
         >
           📎
@@ -183,14 +183,14 @@ export function Composer({
           }}
           rows={1}
           placeholder="Message"
-          className="max-h-40 flex-1 resize-none rounded-2xl border border-white/10 bg-[#0f0f0f] px-4 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-rose-500 focus:outline-none"
+          className="max-h-40 flex-1 resize-none rounded-2xl border border-white/10 bg-[#0f0f0f] px-4 py-2.5 text-[15px] text-slate-100 placeholder:text-slate-500 focus:border-rose-500 focus:outline-none"
         />
         {text.trim() ? (
           <button
             type="button"
             onClick={send}
             disabled={busy}
-            className="grid h-9 w-9 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-50"
+            className="grid h-10 w-10 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-50"
             aria-label="Send"
           >
             ➤

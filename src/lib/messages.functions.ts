@@ -12,6 +12,8 @@ export const deleteConversationMessages = createServerFn({ method: "POST" })
       .delete()
       .eq("conversation_id", data.conversationId);
     if (error) throw new Error(error.message);
+    // Call history belongs to the same thread — clear it too.
+    await supabaseAdmin.from("calls").delete().eq("conversation_id", data.conversationId);
     return { ok: true, by: context.userId };
   });
 
