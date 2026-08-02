@@ -482,11 +482,28 @@ export function useCall({
     if (!pc || !stream) return;
     const next = facingRef.current === "user" ? "environment" : "user";
     try {
-      const fresh = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints(next),
-        audio: false,
-      });
-      const newTrack = fresh.getVideoTracks()[0];
+      let fresh: MediaStream | null = null;
+      try {
+        fresh = await navigator.mediaDevices.getUserMedia({
+          video: { ...videoConstraints(next), facingMode: { exact: next } },
+          audio: false,
+        });
+      } catch {
+        // Some devices (desktops / multi-cam phones) don't honour facingMode:
+        // fall back to picking the next videoinput device explicitly.
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter((d) => d.kind === "videoinput");
+        const currentId = stream.getVideoTracks()[0]?.getSettings().deviceId;
+        const idx = cams.findIndex((c) => c.deviceId === currentId);
+        const target = cams[(idx + 1 + cams.length) % cams.length];
+        if (target) {
+          fresh = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: target.deviceId } },
+            audio: false,
+          });
+        }
+      }
+      const newTrack = fresh?.getVideoTracks()[0];
       if (!newTrack) return;
       const sender = pc.getSenders().find((s) => s.track?.kind === "video");
       await sender?.replaceTrack(newTrack);
@@ -507,15 +524,25 @@ export function useCall({
 
   /* ---------------- effects ---------------- */
 
+  // Camera list is only fully visible after permission is granted, so re-check
+  // whenever the local stream changes; touch devices always get the toggle.
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
+    if (typeof navigator === "undefined") return;
+    const isTouch =
+      navigator.maxTouchPoints > 0 || /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+    if (isTouch) {
+      setHasMultipleCameras(true);
+      return;
+    }
+    if (!navigator.mediaDevices?.enumerateDevices) return;
     navigator.mediaDevices
       .enumerateDevices()
       .then((devices) => {
         setHasMultipleCameras(devices.filter((d) => d.kind === "videoinput").length > 1);
       })
       .catch(() => {});
-  }, []);
+  }, [localStream]);
+
 
   useEffect(() => {
     return () => {

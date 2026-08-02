@@ -1,18 +1,93 @@
 import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
 import { equalGateCode, getGateSession } from "./gate.server";
+import {
+  checkLimit,
+  clearFailures,
+  pace,
+  pruneOldAttempts,
+  recordFailure,
+} from "./ratelimit.server";
 
 export const verifyGateCode = createServerFn({ method: "POST" })
-  .inputValidator((data: { code: string }) => data)
+  .inputValidator((data) => z.object({ code: z.string().min(1).max(200) }).parse(data))
   .handler(async ({ data }) => {
+    const wait = await checkLimit("gate");
+    if (wait > 0) {
+      await pace();
+      return { ok: false as const, retryAfter: wait };
+    }
     const expected = process.env.SITE_SECRET_CODE;
-    if (!expected) return { ok: false as const };
-    if (!equalGateCode(data.code.trim(), expected)) {
-      return { ok: false as const };
+    if (!expected || !equalGateCode(data.code.trim(), expected)) {
+      await recordFailure("gate");
+      await pace();
+      return { ok: false as const, retryAfter: 0 };
     }
     const session = await getGateSession();
     await session.update({ unlocked: true });
-    return { ok: true as const };
+    await clearFailures("gate");
+    void pruneOldAttempts();
+    return { ok: true as const, retryAfter: 0 };
   });
+
+/**
+ * Password sign-in behind the same IP rate limiter. Tokens are returned to the
+ * browser, which installs them with supabase.auth.setSession().
+ */
+export const portalSignIn = createServerFn({ method: "POST" })
+  .inputValidator((data) =>
+    z
+      .object({
+        email: z.string().trim().email().max(255),
+        password: z.string().min(1).max(200),
+      })
+      .parse(data),
+  )
+  .handler(async ({ data }) => {
+    const gate = await getGateSession();
+    if (!gate.data.unlocked) {
+      await pace();
+      return { ok: false as const, retryAfter: 0 };
+    }
+    const wait = await checkLimit("login");
+    if (wait > 0) {
+      await pace();
+      return { ok: false as const, retryAfter: wait };
+    }
+    const { createClient } = await import("@supabase/supabase-js");
+    const url = process.env.SUPABASE_URL!;
+    const key = process.env.SUPABASE_PUBLISHABLE_KEY!;
+    const client = createClient(url, key, {
+      auth: { storage: undefined, persistSession: false, autoRefreshToken: false },
+      global: {
+        fetch: (input, init) => {
+          const h = new Headers(init?.headers);
+          if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`) {
+            h.delete("Authorization");
+          }
+          h.set("apikey", key);
+          return fetch(input, { ...init, headers: h });
+        },
+      },
+    });
+    const { data: res, error } = await client.auth.signInWithPassword({
+      email: data.email,
+      password: data.password,
+    });
+    if (error || !res.session) {
+      await recordFailure("login");
+      await pace();
+      return { ok: false as const, retryAfter: 0 };
+    }
+    await clearFailures("login");
+    return {
+      ok: true as const,
+      retryAfter: 0,
+      accessToken: res.session.access_token,
+      refreshToken: res.session.refresh_token,
+    };
+  });
+
 
 export const isGateUnlocked = createServerFn({ method: "GET" }).handler(
   async () => {
@@ -27,7 +102,7 @@ export const lockGate = createServerFn({ method: "POST" }).handler(async () => {
   return { ok: true as const };
 });
 
-// One-time setup: create the two accounts. Only runs while zero profiles exists.
+// One-time setup: create the two accounts. Only runs while zero profiles exist.
 export const setupTwoAccounts = createServerFn({ method: "POST" })
   .inputValidator(
     (data: {

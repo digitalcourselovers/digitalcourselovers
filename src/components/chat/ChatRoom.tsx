@@ -5,7 +5,11 @@ import { Trash2, Phone, Video } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { lockGate } from "@/lib/gate.functions";
 import { deleteConversationMessages, deleteMessageById } from "@/lib/messages.functions";
+import { forgetMedia } from "@/lib/media-cache";
+
 import { notifyPeer } from "@/lib/push.functions";
+import { pingPartner } from "@/lib/telegram.functions";
+
 import { QuickExit } from "./QuickExit";
 import { MessageList, type ChatMessage, type Reaction, type CallLog } from "./MessageList";
 import { Composer, type ReplyTarget } from "./Composer";
@@ -13,6 +17,11 @@ import { ChatList } from "./ChatList";
 import { subscribeToPush } from "@/lib/push-client";
 import { useCall, type CallSignal } from "@/lib/webrtc/useCall";
 import { CallOverlay } from "./call/CallOverlay";
+import { ThemePicker } from "./ThemePicker";
+import { themeByKey, themeVars } from "@/lib/chat-theme";
+import { decryptText, encryptText, isEncrypted, useE2eeKey } from "@/lib/e2ee";
+import { useLockBodyScroll, useViewportMetrics } from "@/hooks/use-viewport-height";
+
 
 const CONVERSATION_ID = "00000000-0000-0000-0000-000000000001";
 const HIDDEN_KEY = "chat.hidden.ids";
@@ -32,6 +41,8 @@ export function ChatRoom() {
   const deleteAll = useServerFn(deleteConversationMessages);
   const deleteOne = useServerFn(deleteMessageById);
   const notify = useServerFn(notifyPeer);
+  const ping = useServerFn(pingPartner);
+
 
   const [user, setUser] = useState<User | null>(null);
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
@@ -53,6 +64,8 @@ export function ChatRoom() {
       return [];
     }
   });
+  const [themeKey, setThemeKey] = useState("midnight");
+  const [themeOpen, setThemeOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
@@ -106,7 +119,7 @@ export function ChatRoom() {
         return (msgs ?? []) as ChatMessage[];
       }
 
-      const [{ data: profs }, msgs, { data: rx }, { data: callRows }] = await Promise.all([
+      const [{ data: profs }, msgs, { data: rx }, { data: callRows }, { data: settings }] = await Promise.all([
         supabase.from("profiles").select("id, display_name, avatar_url, last_seen_at"),
         loadMessages(),
         supabase.from("message_reactions").select("id, message_id, user_id, emoji"),
@@ -116,6 +129,11 @@ export function ChatRoom() {
           .eq("conversation_id", CONVERSATION_ID)
           .order("started_at", { ascending: true })
           .limit(200),
+        supabase
+          .from("chat_settings")
+          .select("theme")
+          .eq("conversation_id", CONVERSATION_ID)
+          .maybeSingle(),
       ]);
       if (!mounted) return;
       const map: Record<string, Profile> = {};
@@ -126,6 +144,7 @@ export function ChatRoom() {
       setMessages(msgs);
       setReactions((rx ?? []) as Reaction[]);
       setCalls((callRows ?? []) as CallLog[]);
+      if (settings?.theme) setThemeKey(settings.theme);
       setReady(true);
 
       if (data.user) {
@@ -272,6 +291,14 @@ export function ChatRoom() {
           setCalls((prev) => prev.filter((x) => x.id !== oldId));
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "chat_settings" },
+        (payload) => {
+          const next = (payload.new as { theme?: string } | null)?.theme;
+          if (next) setThemeKey(next);
+        },
+      )
       .on("broadcast", { event: "call" }, (payload) => {
         const signal = payload.payload as CallSignal | undefined;
         if (signal?.type) void callSignalRef.current(signal);
@@ -341,7 +368,38 @@ export function ChatRoom() {
     ? "from-emerald-400 to-teal-500"
     : "from-blue-400 via-purple-500 to-pink-500";
 
-  const lastMsg = messages[messages.length - 1];
+  // Decrypt message bodies locally. Ciphertext never leaves the DB decrypted.
+  const encKey = useE2eeKey();
+  const [plainBodies, setPlainBodies] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!encKey) return;
+    const todo = messages.filter((m) => isEncrypted(m.body) && plainBodies[m.id] === undefined);
+    if (todo.length === 0) return;
+    let mounted = true;
+    (async () => {
+      const entries = await Promise.all(
+        todo.map(
+          async (m) =>
+            [m.id, (await decryptText(encKey, m.body as string)) ?? "🔒 Unable to decrypt"] as const,
+        ),
+      );
+      if (mounted) setPlainBodies((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [messages, encKey, plainBodies]);
+
+  const decryptedMessages = useMemo(
+    () =>
+      messages.map((m) =>
+        isEncrypted(m.body) ? { ...m, body: plainBodies[m.id] ?? "…" } : m,
+      ),
+    [messages, plainBodies],
+  );
+
+  const lastMsg = decryptedMessages[decryptedMessages.length - 1];
   const lastMessagePreview = lastMsg
     ? lastMsg.voice_path
       ? "🎤 Voice message"
@@ -358,11 +416,12 @@ export function ChatRoom() {
     ? messages.filter((m) => m.sender_id !== user.id && !m.read_at).length
     : 0;
 
-    const activeCallId = call.state.callId;
-    const visibleMessages = useMemo(
-    () => messages.filter((m) => !hiddenIds.includes(m.id)),
-    [messages, hiddenIds],
+  const activeCallId = call.state.callId;
+  const visibleMessages = useMemo(
+    () => decryptedMessages.filter((m) => !hiddenIds.includes(m.id)),
+    [decryptedMessages, hiddenIds],
   );
+
   const visibleCalls = useMemo(
     () => calls.filter((c) => c.id !== activeCallId && !hiddenIds.includes(c.id)),
     [calls, activeCallId, hiddenIds],
@@ -385,7 +444,8 @@ export function ChatRoom() {
     if (typeof window === "undefined") return;
     if (!window.confirm("Delete the entire chat for both of you? This cannot be undone.")) return;
     try {
-      await deleteAll({ data: { conversationId: CONVERSATION_ID } });
+      const res = await deleteAll({ data: { conversationId: CONVERSATION_ID } });
+      await forgetMedia(res?.removedMedia ?? []);
       setMessages([]);
       setReactions([]);
       setCalls([]);
@@ -423,12 +483,9 @@ export function ChatRoom() {
     setMessages((prev) => prev.filter((x) => x.id !== m.id));
     setReactions((prev) => prev.filter((r) => r.message_id !== m.id));
     try {
-      if (user && m.sender_id === user.id) {
-        const { error } = await supabase.from("messages").delete().eq("id", m.id);
-        if (error) throw error;
-      } else {
-        await deleteOne({ data: { messageId: m.id } });
-      }
+      // Always via the server fn: it removes the row *and* the stored media file.
+      const res = await deleteOne({ data: { messageId: m.id } });
+      await forgetMedia(res?.removedMedia ?? []);
     } catch (e) {
       console.error(e);
       alert("Failed to delete message.");
@@ -436,6 +493,7 @@ export function ChatRoom() {
   }
 
 
+  
   function onReply(m: ChatMessage) {
     const senderName = profiles[m.sender_id]?.display_name ?? "Message";
     let preview = "";
@@ -450,23 +508,30 @@ export function ChatRoom() {
     if (typeof window === "undefined" || !user) return;
     if (m.sender_id !== user.id) return;
     if (m.media_path || m.voice_path || m.media_kind === "gif") return;
+    if (!encKey) {
+      alert("Secure session expired. Re-enter your access code to continue.");
+      return;
+    }
     const next = window.prompt("Edit message", m.body ?? "");
     if (next == null) return;
     const trimmed = next.trim();
     if (!trimmed || trimmed === (m.body ?? "")) return;
     const nowIso = new Date().toISOString();
+    const sealed = await encryptText(encKey, trimmed);
+    setPlainBodies((prev) => ({ ...prev, [m.id]: trimmed }));
     setMessages((prev) =>
-      prev.map((x) => (x.id === m.id ? { ...x, body: trimmed, edited_at: nowIso } : x)),
+      prev.map((x) => (x.id === m.id ? { ...x, body: sealed, edited_at: nowIso } : x)),
     );
     const { error } = await supabase
       .from("messages")
-      .update({ body: trimmed, edited_at: nowIso })
+      .update({ body: sealed, edited_at: nowIso })
       .eq("id", m.id);
     if (error) {
       console.error(error);
       alert("Failed to edit message.");
     }
   }
+
 
 
 
@@ -499,13 +564,36 @@ export function ChatRoom() {
     }
   }
 
+  const theme = themeByKey(themeKey);
+  const { height: viewportHeight, offsetTop: viewportOffsetTop } = useViewportMetrics();
+  useLockBodyScroll();
+
+  async function onSelectTheme(key: string) {
+    setThemeKey(key);
+    setThemeOpen(false);
+    const { error } = await supabase
+      .from("chat_settings")
+      .upsert(
+        { conversation_id: CONVERSATION_ID, theme: key, updated_at: new Date().toISOString() },
+        { onConflict: "conversation_id" },
+      );
+    if (error) console.error(error);
+  }
+
   function startCallWithPing(kind: "voice" | "video") {
     void call.startCall(kind);
     notify({ data: { conversationId: CONVERSATION_ID } }).catch(() => {});
   }
 
   return (
-    <div className="flex h-[100dvh] w-full bg-[#0a0a0a] text-slate-100">
+    <div
+      className="fixed left-0 right-0 flex w-full overflow-hidden bg-[#0a0a0a] text-slate-100"
+      style={{
+        ...themeVars(theme),
+        top: viewportOffsetTop,
+        height: viewportHeight ? `${viewportHeight}px` : "100dvh",
+      }}
+    >
       {!ready && (
         <div className="fixed inset-0 z-50 bg-[#0a0a0a]" aria-hidden="true" />
       )}
@@ -519,16 +607,21 @@ export function ChatRoom() {
         unreadCount={unreadCount}
       />
 
-      <div className="flex h-full min-w-0 flex-1 flex-col bg-[#0f0f0f]">
-        <header className="flex items-center justify-between gap-2 border-b border-white/5 bg-[#171717] px-2.5 py-3 sm:px-4 sm:py-3.5">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#0f0f0f]">
+        <header className="flex shrink-0 items-center justify-between gap-2 border-b border-white/5 bg-[#171717] px-2.5 py-3 sm:px-4 sm:py-3.5">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
             <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full bg-gradient-to-br ${gradient} text-base font-bold text-white shadow`}>
               {assistantInitial}
             </div>
             <div className="min-w-0">
-              <div className="truncate text-[13px] font-semibold leading-tight tracking-tight sm:text-sm">
+              <button
+                type="button"
+                onClick={() => setThemeOpen(true)}
+                title="Change chat theme"
+                className="block max-w-full truncate text-left text-[13px] font-semibold leading-tight tracking-tight transition hover:opacity-80 sm:text-sm"
+              >
                 {assistantName}
-              </div>
+              </button>
               <div className="flex items-center gap-1.5 whitespace-nowrap text-[11px] leading-tight text-slate-400">
                 {peerTyping ? (
                   <span className="text-rose-300">typing…</span>
@@ -616,6 +709,23 @@ export function ChatRoom() {
           </div>
         </div>
       </div>
+
+      <ThemePicker
+        open={themeOpen}
+        current={theme}
+        onClose={() => setThemeOpen(false)}
+        onSelect={onSelectTheme}
+        canPing={email.toLowerCase().startsWith("gf@")}
+        onPing={async () => {
+          try {
+            const res = await ping();
+            return res.ok === true;
+          } catch {
+            return false;
+          }
+        }}
+      />
+
 
       <CallOverlay
         state={call.state}

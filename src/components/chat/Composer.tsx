@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { StickerPicker } from "./StickerPicker";
 import { notifyPeer } from "@/lib/push.functions";
+import { ENC_FILE_SUFFIX, encryptBlob, encryptText, useE2eeKey } from "@/lib/e2ee";
 
 export type ReplyTarget = {
   id: string;
@@ -31,73 +32,139 @@ export function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const notify = useServerFn(notifyPeer);
+  const encKey = useE2eeKey();
   const ping = () => {
     notify({ data: { conversationId } }).catch(() => {});
   };
 
   useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
     if (replyTarget) textareaRef.current?.focus();
   }, [replyTarget]);
+
+  function autoGrow() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }
+
+  useEffect(() => {
+    autoGrow();
+  }, [text]);
+
+  function clearEditor() {
+    setText("");
+    const el = textareaRef.current;
+    if (el) {
+      el.value = "";
+      el.style.height = "auto";
+    }
+  }
+
+  function requireKey() {
+    if (!encKey) {
+      alert("Secure session expired. Re-enter your access code to continue.");
+      return null;
+    }
+    return encKey;
+  }
 
   async function send() {
     if (!currentUserId) return;
     const body = text.trim();
     if (!body) return;
+    const key = requireKey();
+    if (!key) return;
+    // Clear immediately so the field empties without waiting on the network,
+    // and never re-focus afterwards (that is what made the keyboard flicker).
+    clearEditor();
     setBusy(true);
     const { error } = await supabase.from("messages").insert({
       conversation_id: conversationId,
       sender_id: currentUserId,
-      body,
+      body: await encryptText(key, body),
       reply_to_id: replyTarget?.id ?? null,
     });
     setBusy(false);
-    if (!error) {
-      setText("");
-      onClearReply();
-      textareaRef.current?.focus();
-      ping();
+    if (error) {
+      setText(body);
+      return;
     }
+    onClearReply();
+    ping();
   }
 
-  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !currentUserId) return;
+  async function uploadAndSend(file: File) {
+    if (!currentUserId) return;
+    const key = requireKey();
+    if (!key) return;
     setBusy(true);
-    const path = `${currentUserId}/${crypto.randomUUID()}-${file.name}`;
-    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, file, {
-      contentType: file.type,
+    const safeName = (file.name || `paste-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = `${currentUserId}/${crypto.randomUUID()}-${safeName}${ENC_FILE_SUFFIX}`;
+    const sealed = await encryptBlob(key, file);
+    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, sealed, {
+      contentType: "application/octet-stream",
     });
     if (upErr) {
       setBusy(false);
       alert("Upload failed: " + upErr.message);
       return;
     }
+    const caption = text.trim();
     await supabase.from("messages").insert({
       conversation_id: conversationId,
       sender_id: currentUserId,
       media_path: path,
       media_kind: file.type,
-      body: text.trim() || null,
+      body: caption ? await encryptText(key, caption) : null,
       reply_to_id: replyTarget?.id ?? null,
     });
-    setText("");
+    clearEditor();
     onClearReply();
     setBusy(false);
-    if (fileRef.current) fileRef.current.value = "";
     ping();
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await uploadAndSend(file);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  /** Pasted image/video (e.g. long-press a GIF in the keyboard → Copy, or a screenshot). */
+  async function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const files = Array.from(dt.files ?? []).filter(
+      (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+    );
+    if (files.length === 0) return;
+    e.preventDefault();
+    for (const f of files) await uploadAndSend(f);
+  }
+
+  function insertEmoji(emoji: string) {
+    const el = textareaRef.current;
+    const next = text + emoji;
+    setText(next);
+    if (el) {
+      el.value = next;
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    }
   }
 
   async function sendVoice(blob: Blob, durationMs: number) {
     if (!currentUserId) return;
+    const key = requireKey();
+    if (!key) return;
     setBusy(true);
     const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "mp4" : "webm";
-    const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}`;
-    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, blob, {
-      contentType: blob.type || "audio/wav",
+    const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}${ENC_FILE_SUFFIX}`;
+    const sealed = await encryptBlob(key, blob);
+    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, sealed, {
+      contentType: "application/octet-stream",
     });
     if (upErr) {
       setBusy(false);
@@ -109,6 +176,7 @@ export function Composer({
       sender_id: currentUserId,
       voice_path: path,
       voice_duration_ms: durationMs,
+      media_kind: blob.type || "audio/wav",
       reply_to_id: replyTarget?.id ?? null,
     });
     onClearReply();
@@ -118,20 +186,23 @@ export function Composer({
 
   async function sendGif(url: string) {
     if (!currentUserId) return;
+    const key = requireKey();
+    if (!key) return;
     setShowPicker(false);
     await supabase.from("messages").insert({
       conversation_id: conversationId,
       sender_id: currentUserId,
-      body: url,
+      body: await encryptText(key, url),
       media_kind: "gif",
       reply_to_id: replyTarget?.id ?? null,
     });
+
     onClearReply();
     ping();
   }
 
   return (
-    <div className="border-t border-white/5 bg-[#171717] px-4 py-3">
+    <div className="shrink-0 border-t border-white/5 bg-[#171717] px-4 py-3">
       {replyTarget && (
         <div className="mx-auto mb-2 flex w-full items-start gap-2 rounded-lg border-l-2 border-rose-400 bg-white/5 px-3 py-1.5">
           <div className="min-w-0 flex-1">
@@ -153,8 +224,10 @@ export function Composer({
       <div className="relative mx-auto flex w-full items-end gap-2">
         <button
           type="button"
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={() => setShowPicker((s) => !s)}
-          className="grid h-10 w-10 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-lg text-slate-300 hover:bg-white/10"
           aria-label="Emoji and GIF"
         >
           😊
@@ -162,15 +235,20 @@ export function Composer({
         <input ref={fileRef} type="file" hidden onChange={onFile} accept="image/*,video/*" />
         <button
           type="button"
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={() => fileRef.current?.click()}
-          className="grid h-10 w-10 place-items-center rounded-full text-slate-300 hover:bg-white/10"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-slate-300 hover:bg-white/10"
           aria-label="Attach"
         >
           📎
         </button>
         <textarea
           ref={textareaRef}
+          rows={1}
           value={text}
+          placeholder="Message"
+          aria-label="Message"
           onChange={(e) => {
             setText(e.target.value);
             onTyping();
@@ -181,16 +259,16 @@ export function Composer({
               send();
             }
           }}
-          rows={1}
-          placeholder="Message"
-          className="max-h-40 flex-1 resize-none rounded-2xl border border-white/10 bg-[#0f0f0f] px-4 py-2.5 text-[15px] text-slate-100 placeholder:text-slate-500 focus:border-rose-500 focus:outline-none"
+          onPaste={onPaste}
+          className="chat-scroll max-h-36 min-w-0 flex-1 resize-none overflow-y-auto rounded-2xl border border-white/10 bg-[#0f0f0f] px-4 py-2.5 text-[15px] leading-6 text-slate-100 placeholder:text-slate-500 focus:border-rose-500 focus:outline-none"
         />
-        {text.trim() ? (
+        {text.trim() || busy ? (
           <button
             type="button"
+            onPointerDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
             onClick={send}
-            disabled={busy}
-            className="grid h-10 w-10 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-50"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-rose-500 text-white hover:bg-rose-400"
             aria-label="Send"
           >
             ➤
@@ -201,10 +279,7 @@ export function Composer({
         {showPicker && currentUserId && (
           <StickerPicker
             customerId={currentUserId}
-            onEmoji={(e) => {
-              setText((t) => t + e);
-              textareaRef.current?.focus();
-            }}
+            onEmoji={(e) => insertEmoji(e)}
             onGif={(url) => sendGif(url)}
             onClose={() => setShowPicker(false)}
           />

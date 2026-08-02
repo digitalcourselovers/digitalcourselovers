@@ -1,0 +1,1 @@
+ALTER TABLE public.visitor_sessions ADD COLUMN IF NOT EXISTS ip text;

@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as ContactRouteImport } from './routes/contact'
+import { Route as InstructorSigninRouteImport } from './routes/instructor-signin'
 import { Route as InstructorsRouteImport } from './routes/instructors'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as PrivacyRouteImport } from './routes/privacy'
@@ -21,7 +22,9 @@ import { Route as TermsRouteImport } from './routes/terms'
 import { Route as CoursesIndexRouteImport } from './routes/courses.index'
 import { Route as CoursesSlugRouteImport } from './routes/courses.$slug'
 import { Route as PortalEntryRouteImport } from './routes/portal.entry'
+import { Route as AuthenticatedPortalAdminRouteImport } from './routes/_authenticated/portal.admin'
 import { Route as AuthenticatedPortalChatRouteImport } from './routes/_authenticated/portal.chat'
+import { Route as ApiPublicTrackRouteImport } from './routes/api/public/track'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -40,6 +43,11 @@ const AboutRoute = AboutRouteImport.update({
 const ContactRoute = ContactRouteImport.update({
   id: '/contact',
   path: '/contact',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InstructorSigninRoute = InstructorSigninRouteImport.update({
+  id: '/instructor-signin',
+  path: '/instructor-signin',
   getParentRoute: () => rootRouteImport,
 } as any)
 const InstructorsRoute = InstructorsRouteImport.update({
@@ -82,16 +90,28 @@ const PortalEntryRoute = PortalEntryRouteImport.update({
   path: '/portal/entry',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthenticatedPortalAdminRoute =
+  AuthenticatedPortalAdminRouteImport.update({
+    id: '/portal/admin',
+    path: '/portal/admin',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedPortalChatRoute = AuthenticatedPortalChatRouteImport.update({
   id: '/portal/chat',
   path: '/portal/chat',
   getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const ApiPublicTrackRoute = ApiPublicTrackRouteImport.update({
+  id: '/api/public/track',
+  path: '/api/public/track',
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/contact': typeof ContactRoute
+  '/instructor-signin': typeof InstructorSigninRoute
   '/instructors': typeof InstructorsRoute
   '/pricing': typeof PricingRoute
   '/privacy': typeof PrivacyRoute
@@ -100,12 +120,15 @@ export interface FileRoutesByFullPath {
   '/courses/$slug': typeof CoursesSlugRoute
   '/portal/entry': typeof PortalEntryRoute
   '/courses/': typeof CoursesIndexRoute
+  '/portal/admin': typeof AuthenticatedPortalAdminRoute
   '/portal/chat': typeof AuthenticatedPortalChatRoute
+  '/api/public/track': typeof ApiPublicTrackRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/contact': typeof ContactRoute
+  '/instructor-signin': typeof InstructorSigninRoute
   '/instructors': typeof InstructorsRoute
   '/pricing': typeof PricingRoute
   '/privacy': typeof PrivacyRoute
@@ -114,7 +137,9 @@ export interface FileRoutesByTo {
   '/courses/$slug': typeof CoursesSlugRoute
   '/portal/entry': typeof PortalEntryRoute
   '/courses': typeof CoursesIndexRoute
+  '/portal/admin': typeof AuthenticatedPortalAdminRoute
   '/portal/chat': typeof AuthenticatedPortalChatRoute
+  '/api/public/track': typeof ApiPublicTrackRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -122,6 +147,7 @@ export interface FileRoutesById {
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/about': typeof AboutRoute
   '/contact': typeof ContactRoute
+  '/instructor-signin': typeof InstructorSigninRoute
   '/instructors': typeof InstructorsRoute
   '/pricing': typeof PricingRoute
   '/privacy': typeof PrivacyRoute
@@ -130,7 +156,9 @@ export interface FileRoutesById {
   '/courses/$slug': typeof CoursesSlugRoute
   '/portal/entry': typeof PortalEntryRoute
   '/courses/': typeof CoursesIndexRoute
+  '/_authenticated/portal/admin': typeof AuthenticatedPortalAdminRoute
   '/_authenticated/portal/chat': typeof AuthenticatedPortalChatRoute
+  '/api/public/track': typeof ApiPublicTrackRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -138,6 +166,7 @@ export interface FileRouteTypes {
     | '/'
     | '/about'
     | '/contact'
+    | '/instructor-signin'
     | '/instructors'
     | '/pricing'
     | '/privacy'
@@ -146,12 +175,15 @@ export interface FileRouteTypes {
     | '/courses/$slug'
     | '/portal/entry'
     | '/courses/'
+    | '/portal/admin'
     | '/portal/chat'
+    | '/api/public/track'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/about'
     | '/contact'
+    | '/instructor-signin'
     | '/instructors'
     | '/pricing'
     | '/privacy'
@@ -160,13 +192,16 @@ export interface FileRouteTypes {
     | '/courses/$slug'
     | '/portal/entry'
     | '/courses'
+    | '/portal/admin'
     | '/portal/chat'
+    | '/api/public/track'
   id:
     | '__root__'
     | '/'
     | '/_authenticated'
     | '/about'
     | '/contact'
+    | '/instructor-signin'
     | '/instructors'
     | '/pricing'
     | '/privacy'
@@ -175,7 +210,9 @@ export interface FileRouteTypes {
     | '/courses/$slug'
     | '/portal/entry'
     | '/courses/'
+    | '/_authenticated/portal/admin'
     | '/_authenticated/portal/chat'
+    | '/api/public/track'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -183,6 +220,7 @@ export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AboutRoute: typeof AboutRoute
   ContactRoute: typeof ContactRoute
+  InstructorSigninRoute: typeof InstructorSigninRoute
   InstructorsRoute: typeof InstructorsRoute
   PricingRoute: typeof PricingRoute
   PrivacyRoute: typeof PrivacyRoute
@@ -191,6 +229,7 @@ export interface RootRouteChildren {
   CoursesSlugRoute: typeof CoursesSlugRoute
   PortalEntryRoute: typeof PortalEntryRoute
   CoursesIndexRoute: typeof CoursesIndexRoute
+  ApiPublicTrackRoute: typeof ApiPublicTrackRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -221,6 +260,13 @@ declare module '@tanstack/react-router' {
       path: '/contact'
       fullPath: '/contact'
       preLoaderRoute: typeof ContactRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/instructor-signin': {
+      id: '/instructor-signin'
+      path: '/instructor-signin'
+      fullPath: '/instructor-signin'
+      preLoaderRoute: typeof InstructorSigninRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/instructors': {
@@ -279,6 +325,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalEntryRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_authenticated/portal/admin': {
+      id: '/_authenticated/portal/admin'
+      path: '/portal/admin'
+      fullPath: '/portal/admin'
+      preLoaderRoute: typeof AuthenticatedPortalAdminRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/portal/chat': {
       id: '/_authenticated/portal/chat'
       path: '/portal/chat'
@@ -286,14 +339,23 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPortalChatRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/api/public/track': {
+      id: '/api/public/track'
+      path: '/api/public/track'
+      fullPath: '/api/public/track'
+      preLoaderRoute: typeof ApiPublicTrackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 interface AuthenticatedRouteRouteChildren {
+  AuthenticatedPortalAdminRoute: typeof AuthenticatedPortalAdminRoute
   AuthenticatedPortalChatRoute: typeof AuthenticatedPortalChatRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedPortalAdminRoute: AuthenticatedPortalAdminRoute,
   AuthenticatedPortalChatRoute: AuthenticatedPortalChatRoute,
 }
 
@@ -305,6 +367,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AboutRoute: AboutRoute,
   ContactRoute: ContactRoute,
+  InstructorSigninRoute: InstructorSigninRoute,
   InstructorsRoute: InstructorsRoute,
   PricingRoute: PricingRoute,
   PrivacyRoute: PrivacyRoute,
@@ -313,6 +376,7 @@ const rootRouteChildren: RootRouteChildren = {
   CoursesSlugRoute: CoursesSlugRoute,
   PortalEntryRoute: PortalEntryRoute,
   CoursesIndexRoute: CoursesIndexRoute,
+  ApiPublicTrackRoute: ApiPublicTrackRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

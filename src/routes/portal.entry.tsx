@@ -2,7 +2,14 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { isSetupComplete, setupTwoAccounts, verifyGateCode } from "@/lib/gate.functions";
+import { unlockWithCode } from "@/lib/e2ee";
+import {
+  isSetupComplete,
+  portalSignIn,
+  setupTwoAccounts,
+  verifyGateCode,
+} from "@/lib/gate.functions";
+
 
 export const Route = createFileRoute("/portal/entry")({
   head: () => ({
@@ -21,6 +28,8 @@ function PortalEntry() {
   const verify = useServerFn(verifyGateCode);
   const checkSetup = useServerFn(isSetupComplete);
   const runSetup = useServerFn(setupTwoAccounts);
+  const signIn = useServerFn(portalSignIn);
+
 
   const [step, setStep] = useState<Step>("code");
   const [code, setCode] = useState("");
@@ -46,19 +55,45 @@ function PortalEntry() {
     const res = await verify({ data: { code } });
     if (!res.ok) {
       setBusy(false);
-      setError("Invalid credentials");
+      setError(
+        res.retryAfter > 0
+          ? `Too many attempts. Try again in ${Math.ceil(res.retryAfter / 60)} min.`
+          : "Invalid credentials",
+      );
       return;
     }
-    // If a Supabase session already exists on this device, skip login.
+    // Derive the end-to-end encryption key locally from the code. It never
+    // leaves this device.
+    try {
+      await unlockWithCode(code);
+    } catch {
+      setBusy(false);
+      setError("This browser does not support secure messaging.");
+      return;
+    }
+    // If a Supabase session already exists on this device AND it belongs to one
+    // of the two chat participants, skip login. Otherwise (e.g. an admin
+    // session) drop it and ask for credentials.
     const { data: sessionData } = await supabase.auth.getSession();
     if (sessionData.session) {
-      navigate({ to: "/portal/chat" });
-      return;
+      const uid = sessionData.session.user.id;
+      const { data: member } = await supabase
+        .from("conversation_participants")
+        .select("user_id")
+        .eq("conversation_id", "00000000-0000-0000-0000-000000000001")
+        .eq("user_id", uid)
+        .maybeSingle();
+      if (member) {
+        navigate({ to: "/portal/chat" });
+        return;
+      }
+      await supabase.auth.signOut();
     }
     const setup = await checkSetup();
     setBusy(false);
     setStep(setup.complete ? "login" : "setup");
   }
+
 
   async function submitSetup(e: React.FormEvent) {
     e.preventDefault();
@@ -83,9 +118,19 @@ function PortalEntry() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const { error: err } = await supabase.auth.signInWithPassword({
-      email: loginEmail,
-      password: loginPass,
+    const res = await signIn({ data: { email: loginEmail, password: loginPass } });
+    if (!res.ok) {
+      setBusy(false);
+      setError(
+        res.retryAfter > 0
+          ? `Too many attempts. Try again in ${Math.ceil(res.retryAfter / 60)} min.`
+          : "Invalid credentials",
+      );
+      return;
+    }
+    const { error: err } = await supabase.auth.setSession({
+      access_token: res.accessToken,
+      refresh_token: res.refreshToken,
     });
     setBusy(false);
     if (err) {
@@ -94,6 +139,7 @@ function PortalEntry() {
     }
     navigate({ to: "/portal/chat" });
   }
+
 
   useEffect(() => {
     // Preload known state

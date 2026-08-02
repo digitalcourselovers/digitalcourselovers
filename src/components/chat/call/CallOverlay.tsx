@@ -215,7 +215,7 @@ function ActiveCall({
               autoPlay
               playsInline
               muted
-              className={`h-full w-full object-cover ${state.camOff ? "opacity-0" : ""}`}
+              className={`h-full w-full scale-x-[-1] object-cover ${state.camOff ? "opacity-0" : ""}`}
             />
             {state.camOff && (
               <div className="absolute inset-0 grid place-items-center text-[11px] text-slate-400">

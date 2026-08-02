@@ -14,6 +14,27 @@ export type Database = {
   }
   public: {
     Tables: {
+      auth_attempts: {
+        Row: {
+          created_at: string
+          id: string
+          ip_hash: string
+          kind: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          ip_hash: string
+          kind: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          ip_hash?: string
+          kind?: string
+        }
+        Relationships: []
+      }
       calls: {
         Row: {
           answered_at: string | null
@@ -55,6 +76,61 @@ export type Database = {
           status?: string
         }
         Relationships: []
+      }
+      chat_settings: {
+        Row: {
+          conversation_id: string
+          theme: string
+          updated_at: string
+        }
+        Insert: {
+          conversation_id: string
+          theme?: string
+          updated_at?: string
+        }
+        Update: {
+          conversation_id?: string
+          theme?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_settings_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: true
+            referencedRelation: "conversations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      conversation_participants: {
+        Row: {
+          conversation_id: string
+          created_at: string
+          id: string
+          user_id: string
+        }
+        Insert: {
+          conversation_id: string
+          created_at?: string
+          id?: string
+          user_id: string
+        }
+        Update: {
+          conversation_id?: string
+          created_at?: string
+          id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "conversation_participants_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "conversations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       conversations: {
         Row: {
@@ -163,6 +239,57 @@ export type Database = {
           },
         ]
       }
+      page_views: {
+        Row: {
+          created_at: string
+          entered_at: string
+          id: string
+          path: string
+          seconds: number
+          session_id: string
+          title: string | null
+          updated_at: string
+          visitor_id: string
+        }
+        Insert: {
+          created_at?: string
+          entered_at?: string
+          id?: string
+          path: string
+          seconds?: number
+          session_id: string
+          title?: string | null
+          updated_at?: string
+          visitor_id: string
+        }
+        Update: {
+          created_at?: string
+          entered_at?: string
+          id?: string
+          path?: string
+          seconds?: number
+          session_id?: string
+          title?: string | null
+          updated_at?: string
+          visitor_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "page_views_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "visitor_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "page_views_visitor_id_fkey"
+            columns: ["visitor_id"]
+            isOneToOne: false
+            referencedRelation: "visitors"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_url: string | null
@@ -214,15 +341,172 @@ export type Database = {
         }
         Relationships: []
       }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
+      visitor_sessions: {
+        Row: {
+          browser: string | null
+          city: string | null
+          country: string | null
+          created_at: string
+          current_path: string | null
+          device_type: string | null
+          id: string
+          ip: string | null
+          ip_hash: string | null
+          isp: string | null
+          language: string | null
+          last_seen_at: string
+          os: string | null
+          page_count: number
+          referrer: string | null
+          region: string | null
+          screen: string | null
+          session_key: string
+          started_at: string
+          timezone: string | null
+          total_seconds: number
+          updated_at: string
+          user_agent: string | null
+          visitor_id: string
+        }
+        Insert: {
+          browser?: string | null
+          city?: string | null
+          country?: string | null
+          created_at?: string
+          current_path?: string | null
+          device_type?: string | null
+          id?: string
+          ip?: string | null
+          ip_hash?: string | null
+          isp?: string | null
+          language?: string | null
+          last_seen_at?: string
+          os?: string | null
+          page_count?: number
+          referrer?: string | null
+          region?: string | null
+          screen?: string | null
+          session_key: string
+          started_at?: string
+          timezone?: string | null
+          total_seconds?: number
+          updated_at?: string
+          user_agent?: string | null
+          visitor_id: string
+        }
+        Update: {
+          browser?: string | null
+          city?: string | null
+          country?: string | null
+          created_at?: string
+          current_path?: string | null
+          device_type?: string | null
+          id?: string
+          ip?: string | null
+          ip_hash?: string | null
+          isp?: string | null
+          language?: string | null
+          last_seen_at?: string
+          os?: string | null
+          page_count?: number
+          referrer?: string | null
+          region?: string | null
+          screen?: string | null
+          session_key?: string
+          started_at?: string
+          timezone?: string | null
+          total_seconds?: number
+          updated_at?: string
+          user_agent?: string | null
+          visitor_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "visitor_sessions_visitor_id_fkey"
+            columns: ["visitor_id"]
+            isOneToOne: false
+            referencedRelation: "visitors"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      visitors: {
+        Row: {
+          created_at: string
+          first_seen_at: string
+          id: string
+          last_seen_at: string
+          total_page_views: number
+          total_seconds: number
+          updated_at: string
+          visitor_key: string
+        }
+        Insert: {
+          created_at?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          total_page_views?: number
+          total_seconds?: number
+          updated_at?: string
+          visitor_key: string
+        }
+        Update: {
+          created_at?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          total_page_views?: number
+          total_seconds?: number
+          updated_at?: string
+          visitor_key?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      is_conversation_participant: {
+        Args: { _conversation_id: string; _user_id: string }
+        Returns: boolean
+      }
+      shares_conversation_with: {
+        Args: { _a: string; _b: string }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -349,6 +633,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin"],
+    },
   },
 } as const

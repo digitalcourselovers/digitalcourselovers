@@ -1,4 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useRef } from "react";
+
 import { SiteLayout } from "@/components/site/SiteLayout";
 import aisha from "@/assets/instructors/aisha.jpg";
 import arjun from "@/assets/instructors/arjun.jpg";
@@ -17,6 +19,21 @@ export const Route = createFileRoute("/instructors")({
     ],
   }),
   component: () => {
+    const navigate = useNavigate();
+    const clicks = useRef(0);
+    const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const onHeadingClick = () => {
+      clicks.current += 1;
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => {
+        clicks.current = 0;
+      }, 1200);
+      if (clicks.current >= 3) {
+        clicks.current = 0;
+        if (timer.current) clearTimeout(timer.current);
+        navigate({ to: "/instructor-signin" });
+      }
+    };
     const people = [
       { name: "Aisha Sharma", role: "VP Growth, Northwind", focus: "Paid media, MMM", img: aisha },
       { name: "Arjun Mehta", role: "Head of SEO, Contoso", focus: "Technical SEO, content", img: arjun },
@@ -29,7 +46,13 @@ export const Route = createFileRoute("/instructors")({
       <SiteLayout>
         <section className="border-b border-slate-100 bg-slate-50">
           <div className="mx-auto max-w-6xl px-6 py-16">
-            <h1 className="text-4xl font-bold tracking-tight text-slate-900">Instructors</h1>
+            <h1
+              onClick={onHeadingClick}
+              className="cursor-default select-none text-4xl font-bold tracking-tight text-slate-900"
+            >
+              Instructors
+            </h1>
+
             <p className="mt-3 max-w-2xl text-slate-600">
               Practitioners first. Every instructor still ships campaigns week over week.
             </p>

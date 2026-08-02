@@ -3,6 +3,17 @@ import { ChevronDown, Reply, Copy, Trash2, CornerUpLeft, Pencil, Plus, Video, Ph
 const EmojiPicker = lazy(() => import("@emoji-mart/react"));
 import emojiData from "@emoji-mart/data";
 import { supabase } from "@/integrations/supabase/client";
+import { decryptToBlob, isEncryptedPath, useE2eeKey } from "@/lib/e2ee";
+import {
+  dedupe,
+  fetchCachedBytes,
+  getCachedObjectUrl,
+  getCachedSignedUrl,
+  setCachedObjectUrl,
+  setCachedSignedUrl,
+} from "@/lib/media-cache";
+
+
 
 export type ChatMessage = {
   id: string;
@@ -158,6 +169,18 @@ export function MessageList({
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Keep the newest bubble visible when the on-screen keyboard opens/closes.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      requestAnimationFrame(() => scrollToBottom(false));
+    };
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, []);
+
+
   // Swipe handlers on row
   function onRowPointerDown(e: React.PointerEvent, m: ChatMessage) {
     if (e.pointerType === "mouse") return; // desktop uses context menu, not swipe
@@ -259,7 +282,7 @@ export function MessageList({
                   {/* Reply reveal indicator (mobile swipe) */}
                   {dx > 0 && (
                     <div
-                      className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-rose-400"
+                      className="pointer-events-none absolute inset-y-0 left-2 flex items-center text-[var(--chat-accent)]"
                       style={{ opacity: Math.min(dx / 60, 1) }}
                     >
                       <CornerUpLeft className="h-5 w-5" />
@@ -281,7 +304,7 @@ export function MessageList({
                     <div
                       className={`max-w-[75%] select-none rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
                         mine
-                          ? "rounded-br-md bg-rose-500 text-white"
+                          ? "rounded-br-md bg-[var(--bub-out)] text-[var(--bub-out-fg)]"
                           : "rounded-bl-md bg-[#1f1f1f] text-slate-100"
                       }`}
                     >
@@ -289,8 +312,8 @@ export function MessageList({
                         <div
                           className={`mb-1.5 rounded-md border-l-2 px-2 py-1 text-[11px] ${
                             mine
-                              ? "border-white/70 bg-white/15 text-rose-50"
-                              : "border-rose-400 bg-white/5 text-slate-300"
+                              ? "border-white/70 bg-white/15 text-[var(--bub-out-fg)]"
+                              : "border-[var(--chat-accent)] bg-white/5 text-slate-300"
                           }`}
                         >
                           <div className="font-semibold opacity-90">
@@ -300,7 +323,7 @@ export function MessageList({
                         </div>
                       )}
                       <Bubble msg={m} />
-                      <div className={`mt-1 flex items-center gap-1 text-[10px] ${mine ? "text-rose-100/80" : "text-slate-400"}`}>
+                      <div className={`mt-1 flex items-center gap-1 text-[10px] ${mine ? "text-[var(--bub-out-fg)] opacity-80" : "text-slate-400"}`}>
                         <span>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                         {m.edited_at && <span className="italic opacity-80">edited</span>}
                         {mine && (
@@ -325,7 +348,7 @@ export function MessageList({
                                   mineReact
                                     ? "bg-white/25 text-white"
                                     : mine
-                                      ? "bg-white/15 text-rose-50"
+                                      ? "bg-white/15 text-[var(--bub-out-fg)]"
                                       : "bg-white/10 text-slate-200"
                                 }`}
                               >
@@ -515,7 +538,7 @@ export function MessageList({
           type="button"
           onClick={() => scrollToBottom(true)}
           aria-label="Scroll to latest"
-          className="absolute bottom-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-rose-500 text-white shadow-lg shadow-black/40 transition hover:bg-rose-400"
+          className="absolute bottom-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--chat-accent)] text-black shadow-lg shadow-black/40 transition hover:opacity-90"
         >
           <ChevronDown className="h-5 w-5" />
         </button>
@@ -586,24 +609,79 @@ function linkify(text: string) {
 
 function Bubble({ msg }: { msg: ChatMessage }) {
   if (msg.media_kind === "gif" && msg.body) {
-    return <img src={msg.body} alt="gif" className="h-40 w-40 rounded-lg object-cover sm:h-44 sm:w-44" />;
+    return (
+      <img
+        src={msg.body}
+        alt="gif"
+        loading="lazy"
+        decoding="async"
+        className="h-40 w-40 rounded-lg object-cover sm:h-44 sm:w-44"
+      />
+    );
   }
   if (msg.media_path) return <MediaBubble path={msg.media_path} kind={msg.media_kind} body={msg.body} />;
-  if (msg.voice_path) return <VoiceBubble path={msg.voice_path} durationMs={msg.voice_duration_ms} />;
+  if (msg.voice_path)
+    return <VoiceBubble path={msg.voice_path} durationMs={msg.voice_duration_ms} kind={msg.media_kind} />;
   return <span className="whitespace-pre-wrap break-words">{msg.body ? linkify(msg.body) : null}</span>;
 }
 
+/** Tracks whether an element has ever scrolled near the viewport. */
+function useInView<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [inView, setInView] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || inView) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setInView(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin: "250px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [inView]);
+
+  return { ref, inView };
+}
+
 function MediaBubble({ path, kind, body }: { path: string; kind: string | null; body: string | null }) {
-  const url = useSignedUrl(path);
-  if (!url) return <span className="text-xs opacity-70">loading…</span>;
   const isImage = kind?.startsWith("image/");
   const isVideo = kind?.startsWith("video/");
+  const { ref, inView } = useInView<HTMLDivElement>();
+  const [opened, setOpened] = useState(false);
+  // Images resolve once scrolled near; video/file wait for an explicit tap.
+  const url = useMediaUrl(path, kind, isImage ? inView : opened);
+
   return (
-    <div className="space-y-1">
-      {isImage ? (
-        <img src={url} alt="attachment" className="max-h-72 rounded-lg" />
+    <div ref={ref} className="space-y-1">
+      {isVideo && !opened ? (
+        <button
+          type="button"
+          onClick={() => setOpened(true)}
+          className="grid h-40 w-56 place-items-center rounded-lg bg-black/40 text-2xl"
+          aria-label="Load video"
+        >
+          ▶
+        </button>
+      ) : url === "error" ? (
+        <span className="text-xs opacity-70">🔒 Unable to open</span>
+      ) : !url ? (
+        <div className="grid h-40 w-56 place-items-center rounded-lg bg-black/20 text-xs opacity-70">
+          loading…
+        </div>
+      ) : isImage ? (
+        <img src={url} alt="attachment" loading="lazy" decoding="async" className="max-h-72 rounded-lg" />
       ) : isVideo ? (
-        <video src={url} controls className="max-h-72 rounded-lg" />
+        <video src={url} controls autoPlay preload="none" className="max-h-72 rounded-lg" />
       ) : (
         <a href={url} target="_blank" rel="noreferrer" className="underline">
           Download file
@@ -614,42 +692,100 @@ function MediaBubble({ path, kind, body }: { path: string; kind: string | null; 
   );
 }
 
-function VoiceBubble({ path, durationMs }: { path: string; durationMs: number | null }) {
-  const url = useSignedUrl(path);
-  if (!url) return <span className="text-xs opacity-70">loading…</span>;
+function VoiceBubble({
+  path,
+  durationMs,
+  kind,
+}: {
+  path: string;
+  durationMs: number | null;
+  kind?: string | null;
+}) {
+  const [opened, setOpened] = useState(false);
+  const url = useMediaUrl(path, kind ?? "audio/wav", opened);
+  const seconds = durationMs != null ? `${Math.round(durationMs / 1000)}s` : null;
+
+  if (!opened) {
+    return (
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpened(true)}
+          className="grid h-8 w-8 place-items-center rounded-full bg-black/30 text-xs"
+          aria-label="Play voice message"
+        >
+          ▶
+        </button>
+        <span className="text-xs opacity-70">Voice message</span>
+        {seconds && <span className="text-[10px] opacity-70">{seconds}</span>}
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2">
-      <audio src={url} controls className="h-8 max-w-[220px]" />
-      {durationMs != null && <span className="text-[10px] opacity-70">{Math.round(durationMs / 1000)}s</span>}
+      {url === "error" ? (
+        <span className="text-xs opacity-70">🔒 Unable to open</span>
+      ) : !url ? (
+        <span className="text-xs opacity-70">loading…</span>
+      ) : (
+        <audio src={url} controls autoPlay preload="none" className="h-8 max-w-[220px]" />
+      )}
+      {seconds && <span className="text-[10px] opacity-70">{seconds}</span>}
     </div>
   );
 }
 
-function useSignedUrl(path: string) {
-  const [url, setUrl] = useState<string | null>(() => signedUrlCache.get(path) ?? null);
+/**
+ * Resolves a storage path to a playable URL, but only once `enabled` is true so
+ * nothing is downloaded before the user actually sees or opens the attachment.
+ * Signed URLs and decrypted blobs are cached and reused across renders.
+ */
+function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
+  const key = useE2eeKey();
+  const encrypted = isEncryptedPath(path);
+  const [url, setUrl] = useState<string | null>(
+    () => getCachedObjectUrl(path) ?? getCachedSignedUrl(path) ?? null,
+  );
+
   useEffect(() => {
-    if (signedUrlCache.has(path)) {
-      setUrl(signedUrlCache.get(path)!);
+    if (!enabled || url) return;
+    const cached = getCachedObjectUrl(path) ?? getCachedSignedUrl(path);
+    if (cached) {
+      setUrl(cached);
       return;
     }
+    if (encrypted && !key) return;
     let mounted = true;
-    supabase.storage
-      .from("chat-media")
-      .createSignedUrl(path, 60 * 60)
-      .then(({ data }) => {
-        if (!mounted) return;
-        if (data?.signedUrl) {
-          signedUrlCache.set(path, data.signedUrl);
-          setUrl(data.signedUrl);
-        }
-      });
+    dedupe(path, async () => {
+      const { data } = await supabase.storage.from("chat-media").createSignedUrl(path, 60 * 60);
+      const signed = data?.signedUrl;
+      if (!signed) return "error";
+      if (!encrypted) {
+        setCachedSignedUrl(path, signed);
+        return signed;
+      }
+      try {
+        const buf = await fetchCachedBytes(path, signed);
+        const blob = await decryptToBlob(key!, buf, mime || "application/octet-stream");
+        const objUrl = URL.createObjectURL(blob);
+        setCachedObjectUrl(path, objUrl);
+        return objUrl;
+      } catch {
+        return "error";
+      }
+    }).then((resolved) => {
+      if (mounted && resolved) setUrl(resolved);
+    });
     return () => {
       mounted = false;
     };
-  }, [path]);
+  }, [path, encrypted, key, mime, enabled, url]);
+
   return url;
 }
-const signedUrlCache = new Map<string, string>();
+
+
 
 function dayStr(iso: string) {
   const d = new Date(iso);
@@ -695,7 +831,7 @@ function CallLogRow({ call, currentUserId }: { call: CallLog; currentUserId: str
     <div className={`flex ${outgoing ? "justify-end" : "justify-start"}`}>
       <div
         className={`flex min-w-[190px] max-w-[75%] items-center gap-3 rounded-2xl px-3 py-2.5 shadow-sm ${
-          outgoing ? "rounded-br-md bg-rose-500/90" : "rounded-bl-md bg-[#1f1f1f]"
+          outgoing ? "rounded-br-md bg-[var(--bub-out)]" : "rounded-bl-md bg-[#1f1f1f]"
         }`}
       >
         <span className="relative grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/10">
@@ -714,11 +850,11 @@ function CallLogRow({ call, currentUserId }: { call: CallLog; currentUserId: str
           <div className={`text-sm font-semibold ${outgoing ? "text-white" : "text-slate-100"}`}>
             {isVideo ? "Video call" : "Voice call"}
           </div>
-          <div className={`text-[13px] ${unanswered ? "text-rose-300" : outgoing ? "text-rose-50/90" : "text-slate-400"}`}>
+          <div className={`text-[13px] ${unanswered ? "text-rose-300" : outgoing ? "text-[var(--bub-out-fg)] opacity-90" : "text-slate-400"}`}>
             {subText}
           </div>
         </div>
-        <span className={`self-end text-[10px] ${outgoing ? "text-rose-100/80" : "text-slate-500"}`}>{time}</span>
+        <span className={`self-end text-[10px] ${outgoing ? "text-[var(--bub-out-fg)] opacity-80" : "text-slate-500"}`}>{time}</span>
       </div>
     </div>
   );
