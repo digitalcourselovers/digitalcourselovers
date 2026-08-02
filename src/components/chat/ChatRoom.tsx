@@ -493,7 +493,7 @@ export function ChatRoom() {
   }
 
 
-  
+
   function onReply(m: ChatMessage) {
     const senderName = profiles[m.sender_id]?.display_name ?? "Message";
     let preview = "";
@@ -732,6 +732,7 @@ export function ChatRoom() {
         localStream={call.localStream}
         remoteStream={call.remoteStream}
         hasMultipleCameras={call.hasMultipleCameras}
+        facing={call.facing}
         peerName={assistantName}
         peerInitial={assistantInitial}
         gradient={gradient}

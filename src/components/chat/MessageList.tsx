@@ -86,6 +86,18 @@ export function MessageList({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const pressTimer = useRef<number | null>(null);
   const [showJump, setShowJump] = useState(false);
+  const [flashId, setFlashId] = useState<string | null>(null);
+  const flashTimer = useRef<number | null>(null);
+
+  const jumpToMessage = (id: string) => {
+    const el = scrollRef.current?.querySelector<HTMLElement>(`[data-mid="${id}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlashId(id);
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlashId(null), 1600);
+  };
+
 
   // Swipe-to-reply state
   const swipeStateRef = useRef<{ id: string | null; startX: number; startY: number; dx: number; active: boolean }>({
@@ -270,7 +282,7 @@ export function MessageList({
             const rxGrouped = groupReactions(rxs);
             const dx = swipeId === m.id ? swipeDx : 0;
             return (
-              <div key={m.id}>
+              <div key={m.id} data-mid={m.id} className="scroll-mt-24">
                 {showDay && (
                   <div className="my-4 flex items-center justify-center">
                     <span className="rounded-full bg-white/5 px-3 py-1 text-[11px] text-slate-400">
@@ -302,15 +314,22 @@ export function MessageList({
                     onPointerCancel={(e) => onRowPointerEnd(e, m)}
                   >
                     <div
-                      className={`max-w-[75%] select-none rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
+                      className={`max-w-[75%] select-none rounded-2xl px-3.5 py-2 text-sm shadow-sm transition-shadow ${
                         mine
                           ? "rounded-br-md bg-[var(--bub-out)] text-[var(--bub-out-fg)]"
                           : "rounded-bl-md bg-[#1f1f1f] text-slate-100"
-                      }`}
+                      } ${flashId === m.id ? "ring-2 ring-[var(--chat-accent)]" : ""}`}
                     >
                       {replyTo && (
-                        <div
-                          className={`mb-1.5 rounded-md border-l-2 px-2 py-1 text-[11px] ${
+                        <button
+                          type="button"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onPointerUp={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            jumpToMessage(replyTo.id);
+                          }}
+                          className={`mb-1.5 block w-full rounded-md border-l-2 px-2 py-1 text-left text-[11px] transition hover:opacity-80 ${
                             mine
                               ? "border-white/70 bg-white/15 text-[var(--bub-out-fg)]"
                               : "border-[var(--chat-accent)] bg-white/5 text-slate-300"
@@ -320,8 +339,9 @@ export function MessageList({
                             {profiles[replyTo.sender_id]?.display_name ?? "Message"}
                           </div>
                           <div className="truncate opacity-90">{previewOf(replyTo)}</div>
-                        </div>
+                        </button>
                       )}
+                      
                       <Bubble msg={m} />
                       <div className={`mt-1 flex items-center gap-1 text-[10px] ${mine ? "text-[var(--bub-out-fg)] opacity-80" : "text-slate-400"}`}>
                         <span>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>

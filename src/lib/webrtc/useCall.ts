@@ -64,6 +64,7 @@ export function useCall({
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const [facing, setFacing] = useState<"user" | "environment">("user");
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localRef = useRef<MediaStream | null>(null);
@@ -77,6 +78,7 @@ export function useCall({
   const ringTimerRef = useRef<number | null>(null);
   const recoverTimerRef = useRef<number | null>(null);
   const stateRef = useRef<CallState>(initialState);
+  const switchingRef = useRef(false);
 
   stateRef.current = state;
 
@@ -266,6 +268,7 @@ export function useCall({
       kindRef.current = kind;
       isCallerRef.current = true;
       facingRef.current = "user";
+      setFacing("user");
       setState({
         ...initialState,
         phase: "outgoing",
@@ -395,6 +398,8 @@ export function useCall({
         pendingOfferRef.current = msg.sdp;
         pendingIceRef.current = [];
         facingRef.current = "user";
+        setFacing("user");
+
         setState({
           ...initialState,
           phase: "incoming",
@@ -479,46 +484,100 @@ export function useCall({
   const switchCamera = useCallback(async () => {
     const pc = pcRef.current;
     const stream = localRef.current;
-    if (!pc || !stream) return;
+    if (!pc || !stream || switchingRef.current) return;
+    switchingRef.current = true;
     const next = facingRef.current === "user" ? "environment" : "user";
+    const oldTrack = stream.getVideoTracks()[0];
+
+    // Pick the explicit target device up-front: most phones only allow one
+    // camera to be open at a time, so we must release the current track first.
+    let targetDeviceId: string | undefined;
     try {
-      let fresh: MediaStream | null = null;
-      try {
-        fresh = await navigator.mediaDevices.getUserMedia({
-          video: { ...videoConstraints(next), facingMode: { exact: next } },
-          audio: false,
-        });
-      } catch {
-        // Some devices (desktops / multi-cam phones) don't honour facingMode:
-        // fall back to picking the next videoinput device explicitly.
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const cams = devices.filter((d) => d.kind === "videoinput");
-        const currentId = stream.getVideoTracks()[0]?.getSettings().deviceId;
-        const idx = cams.findIndex((c) => c.deviceId === currentId);
-        const target = cams[(idx + 1 + cams.length) % cams.length];
-        if (target) {
-          fresh = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { exact: target.deviceId } },
-            audio: false,
-          });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter((d) => d.kind === "videoinput");
+      if (cams.length > 1) {
+        const currentId = oldTrack?.getSettings().deviceId;
+        const byLabel = cams.find((c) =>
+          next === "environment"
+            ? /back|rear|environment/i.test(c.label)
+            : /front|user|face/i.test(c.label),
+        );
+        if (byLabel && byLabel.deviceId !== currentId) {
+          targetDeviceId = byLabel.deviceId;
+        } else {
+          const idx = cams.findIndex((c) => c.deviceId === currentId);
+          targetDeviceId = cams[(idx + 1 + cams.length) % cams.length]?.deviceId;
         }
       }
-      const newTrack = fresh?.getVideoTracks()[0];
-      if (!newTrack) return;
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-      await sender?.replaceTrack(newTrack);
-      stream.getVideoTracks().forEach((t) => {
-        stream.removeTrack(t);
-        t.stop();
-      });
-      stream.addTrack(newTrack);
-      newTrack.enabled = !stateRef.current.camOff;
-      facingRef.current = next;
-      setLocalStream(new MediaStream(stream.getTracks()));
     } catch {
       /* noop */
     }
+
+    // Release the current camera so the other lens can be opened.
+    if (oldTrack) {
+      try {
+        stream.removeTrack(oldTrack);
+        oldTrack.stop();
+      } catch {
+        /* noop */
+      }
+    }
+
+    const attempts: MediaStreamConstraints[] = [
+      { video: { ...videoConstraints(next), facingMode: { exact: next } }, audio: false },
+      ...(targetDeviceId
+        ? [{ video: { deviceId: { exact: targetDeviceId } }, audio: false } as MediaStreamConstraints]
+        : []),
+      { video: { ...videoConstraints(next), facingMode: next }, audio: false },
+    ];
+
+    let newTrack: MediaStreamTrack | null = null;
+    for (const constraints of attempts) {
+      try {
+        const fresh = await navigator.mediaDevices.getUserMedia(constraints);
+        newTrack = fresh.getVideoTracks()[0] ?? null;
+        if (newTrack) break;
+      } catch {
+        /* try next */
+      }
+    }
+
+    if (!newTrack) {
+      // Nothing worked — reopen the previous camera so the call keeps video.
+      try {
+        const back = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints(facingRef.current),
+          audio: false,
+        });
+        newTrack = back.getVideoTracks()[0] ?? null;
+      } catch {
+        /* noop */
+      }
+      if (newTrack) {
+        stream.addTrack(newTrack);
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        await sender?.replaceTrack(newTrack).catch(() => {});
+        setLocalStream(new MediaStream(stream.getTracks()));
+      }
+      switchingRef.current = false;
+      return;
+    }
+
+    try {
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      await sender?.replaceTrack(newTrack);
+      stream.addTrack(newTrack);
+      newTrack.enabled = !stateRef.current.camOff;
+      facingRef.current = next;
+      setFacing(next);
+      setLocalStream(new MediaStream(stream.getTracks()));
+    } catch {
+      /* noop */
+    } finally {
+      switchingRef.current = false;
+    }
   }, []);
+
 
   const clearError = useCallback(() => setState((s) => ({ ...s, error: null })), []);
 
@@ -558,6 +617,7 @@ export function useCall({
     localStream,
     remoteStream,
     hasMultipleCameras,
+    facing,
     startCall,
     accept,
     decline,

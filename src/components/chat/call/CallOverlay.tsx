@@ -10,6 +10,7 @@ export function CallOverlay({
   localStream,
   remoteStream,
   hasMultipleCameras,
+  facing = "user",
   peerName,
   peerInitial,
   gradient,
@@ -25,6 +26,7 @@ export function CallOverlay({
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   hasMultipleCameras: boolean;
+  facing?: "user" | "environment";
   peerName: string;
   peerInitial: string;
   gradient: string;
@@ -74,6 +76,7 @@ export function CallOverlay({
       localStream={localStream}
       remoteStream={remoteStream}
       hasMultipleCameras={hasMultipleCameras}
+      facing={facing}
       peerName={peerName}
       peerInitial={peerInitial}
       gradient={gradient}
@@ -90,6 +93,7 @@ function ActiveCall({
   localStream,
   remoteStream,
   hasMultipleCameras,
+  facing = "user",
   peerName,
   peerInitial,
   gradient,
@@ -102,6 +106,7 @@ function ActiveCall({
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   hasMultipleCameras: boolean;
+  facing?: "user" | "environment";
   peerName: string;
   peerInitial: string;
   gradient: string;
@@ -215,7 +220,7 @@ function ActiveCall({
               autoPlay
               playsInline
               muted
-              className={`h-full w-full scale-x-[-1] object-cover ${state.camOff ? "opacity-0" : ""}`}
+              className={`h-full w-full object-cover ${facing === "user" ? "scale-x-[-1]" : ""} ${state.camOff ? "opacity-0" : ""}`}
             />
             {state.camOff && (
               <div className="absolute inset-0 grid place-items-center text-[11px] text-slate-400">
