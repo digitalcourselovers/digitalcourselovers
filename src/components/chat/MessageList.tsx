@@ -66,6 +66,8 @@ export function MessageList({
   onDeleteCallForMe,
   onEdit,
   onToggleReaction,
+  hasMoreOlder = false,
+  onLoadOlder,
 }: {
   messages: ChatMessage[];
   calls?: CallLog[];
@@ -79,6 +81,8 @@ export function MessageList({
   onDeleteCallForMe: (c: CallLog) => void;
   onEdit: (m: ChatMessage) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
+  hasMoreOlder?: boolean;
+  onLoadOlder?: () => Promise<void> | void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
@@ -88,6 +92,9 @@ export function MessageList({
   const [showJump, setShowJump] = useState(false);
   const [flashId, setFlashId] = useState<string | null>(null);
   const flashTimer = useRef<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const restoreRef = useRef<number | null>(null);
+
 
   const jumpToMessage = (id: string) => {
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-mid="${id}"]`);
@@ -164,6 +171,13 @@ export function MessageList({
 
   const didInitialScroll = useRef(false);
   useEffect(() => {
+    // After prepending older messages, keep the reader exactly where they were.
+    if (restoreRef.current != null) {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight - restoreRef.current;
+      restoreRef.current = null;
+      return;
+    }
     if (!didInitialScroll.current && messages.length > 0) {
       didInitialScroll.current = true;
       // jump instantly to newest on first load
@@ -173,13 +187,29 @@ export function MessageList({
     if (isNearBottom()) scrollToBottom(true);
   }, [messages, calls]);
 
+  const loadOlder = async () => {
+    const el = scrollRef.current;
+    if (!el || !onLoadOlder || !hasMoreOlder || loadingOlder) return;
+    setLoadingOlder(true);
+    restoreRef.current = el.scrollHeight - el.scrollTop;
+    try {
+      await onLoadOlder();
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const onScroll = () => setShowJump(!isNearBottom());
+    const onScroll = () => {
+      setShowJump(!isNearBottom());
+      if (el.scrollTop < 80) void loadOlder();
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [hasMoreOlder, loadingOlder, onLoadOlder]);
+
 
   // Keep the newest bubble visible when the on-screen keyboard opens/closes.
   useEffect(() => {
@@ -244,6 +274,10 @@ export function MessageList({
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollRef} className="chat-scroll h-full overflow-y-auto px-3 py-4 sm:px-4">
         <div className="mx-auto flex w-full flex-col gap-2">
+          {loadingOlder && (
+            <div className="py-2 text-center text-xs text-white/40">Loading earlier messages…</div>
+          )}
+
           {items.map((item, i) => {
             const prevItem = items[i - 1];
             const showDayLine = !prevItem || dayStr(prevItem.t) !== dayStr(item.t);
@@ -341,7 +375,7 @@ export function MessageList({
                           <div className="truncate opacity-90">{previewOf(replyTo)}</div>
                         </button>
                       )}
-                      
+
                       <Bubble msg={m} />
                       <div className={`mt-1 flex items-center gap-1 text-[10px] ${mine ? "text-[var(--bub-out-fg)] opacity-80" : "text-slate-400"}`}>
                         <span>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>

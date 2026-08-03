@@ -36,6 +36,74 @@ function formatLastSeen(iso: string | null): string {
   return `last seen at ${hh}:${mm}`;
 }
 
+const PAGE_SIZE = 60;
+
+/** Newest page of messages (ascending order in the returned array). */
+async function fetchRecentMessages(retry = 0): Promise<ChatMessage[]> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .eq("conversation_id", CONVERSATION_ID)
+    .order("created_at", { ascending: false })
+    .limit(PAGE_SIZE);
+  if (error) {
+    if (retry < 2) {
+      await supabase.auth.refreshSession().catch(() => {});
+      await new Promise((r) => setTimeout(r, 400));
+      return fetchRecentMessages(retry + 1);
+    }
+    return [];
+  }
+  return ((data ?? []) as ChatMessage[]).slice().reverse();
+}
+
+/** Older page, strictly before `beforeIso` (ascending order). */
+async function fetchOlderMessages(beforeIso: string): Promise<ChatMessage[]> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .eq("conversation_id", CONVERSATION_ID)
+    .lt("created_at", beforeIso)
+    .order("created_at", { ascending: false })
+    .limit(PAGE_SIZE);
+  if (error) return [];
+  return ((data ?? []) as ChatMessage[]).slice().reverse();
+}
+
+/**
+ * Safety net: pulls anything newer than what we already hold, so a dropped
+ * realtime packet can never make a new message disappear.
+ */
+async function fetchNewerMessages(afterIso: string): Promise<ChatMessage[]> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .eq("conversation_id", CONVERSATION_ID)
+    .gte("created_at", afterIso)
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (error) return [];
+  return (data ?? []) as ChatMessage[];
+}
+
+function mergeMessages(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  if (incoming.length === 0) return prev;
+  const map = new Map(prev.map((m) => [m.id, m]));
+  let changed = false;
+  for (const m of incoming) {
+    const existing = map.get(m.id);
+    if (!existing || existing.edited_at !== m.edited_at || existing.read_at !== m.read_at) changed = true;
+    map.set(m.id, m);
+  }
+  if (!changed) return prev;
+  return Array.from(map.values()).sort((a, b) =>
+    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
+  );
+}
+
+
+
+
 export function ChatRoom() {
   const lock = useServerFn(lockGate);
   const deleteAll = useServerFn(deleteConversationMessages);
@@ -94,6 +162,39 @@ export function ChatRoom() {
   callActiveRef.current = call.active;
 
 
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
+  const loadingOlderRef = useRef(false);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
+
+  const applyMessages = useCallback((incoming: ChatMessage[]) => {
+    setMessages((prev) => mergeMessages(prev, incoming));
+  }, []);
+
+  const loadOlder = useCallback(async () => {
+    if (loadingOlderRef.current || !hasMoreOlder) return;
+    const oldest = messagesRef.current[0]?.created_at;
+    if (!oldest) return;
+    loadingOlderRef.current = true;
+    try {
+      const older = await fetchOlderMessages(oldest);
+      if (older.length < PAGE_SIZE) setHasMoreOlder(false);
+      if (older.length) applyMessages(older);
+    } finally {
+      loadingOlderRef.current = false;
+    }
+  }, [applyMessages, hasMoreOlder]);
+
+  const syncNewer = useCallback(async () => {
+    const list = messagesRef.current;
+    const newest = list[list.length - 1]?.created_at;
+    if (!newest) {
+      applyMessages(await fetchRecentMessages());
+      return;
+    }
+    applyMessages(await fetchNewerMessages(newest));
+  }, [applyMessages]);
+
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -101,33 +202,15 @@ export function ChatRoom() {
       if (!mounted) return;
       setUser(data.user ?? null);
 
-      async function loadMessages(retry = 0): Promise<ChatMessage[]> {
-        const { data: msgs, error } = await supabase
-          .from("messages")
-          .select("*")
-          .eq("conversation_id", CONVERSATION_ID)
-          .order("created_at", { ascending: true })
-          .limit(500);
-        if (error) {
-          if (retry < 2) {
-            await supabase.auth.refreshSession().catch(() => {});
-            await new Promise((r) => setTimeout(r, 400));
-            return loadMessages(retry + 1);
-          }
-          return [];
-        }
-        return (msgs ?? []) as ChatMessage[];
-      }
-
       const [{ data: profs }, msgs, { data: rx }, { data: callRows }, { data: settings }] = await Promise.all([
         supabase.from("profiles").select("id, display_name, avatar_url, last_seen_at"),
-        loadMessages(),
+        fetchRecentMessages(),
         supabase.from("message_reactions").select("id, message_id, user_id, emoji"),
         supabase
           .from("calls")
           .select("id, caller_id, callee_id, kind, status, started_at, answered_at, ended_at, duration_ms")
           .eq("conversation_id", CONVERSATION_ID)
-          .order("started_at", { ascending: true })
+          .order("started_at", { ascending: false })
           .limit(200),
         supabase
           .from("chat_settings")
@@ -137,13 +220,14 @@ export function ChatRoom() {
       ]);
       if (!mounted) return;
       const map: Record<string, Profile> = {};
-      (profs ?? []).forEach((p) => (map[p.id] = p as Profile));
+      (profs ?? []).forEach((p: Profile) => (map[p.id] = p as Profile));
       setProfiles(map);
-      const peer = (profs ?? []).find((p) => p.id !== data.user?.id) as Profile | undefined;
+      const peer = (profs ?? []).find((p: Profile) => p.id !== data.user?.id) as Profile | undefined;
       if (peer?.last_seen_at) setPeerLastSeen(peer.last_seen_at);
       setMessages(msgs);
+      if (msgs.length < PAGE_SIZE) setHasMoreOlder(false);
       setReactions((rx ?? []) as Reaction[]);
-      setCalls((callRows ?? []) as CallLog[]);
+      setCalls(((callRows ?? []) as CallLog[]).slice().reverse());
       if (settings?.theme) setThemeKey(settings.theme);
       setReady(true);
 
@@ -155,6 +239,23 @@ export function ChatRoom() {
       mounted = false;
     };
   }, []);
+
+  // Poll for anything realtime may have missed (dropped socket, sleeping tab).
+  useEffect(() => {
+    if (!ready) return;
+    const t = window.setInterval(() => {
+      syncNewer().catch(() => {});
+    }, 10_000);
+    const onFocus = () => {
+      syncNewer().catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [ready, syncNewer]);
+
 
   useEffect(() => {
     function autoExit() {
@@ -227,13 +328,8 @@ export function ChatRoom() {
           const oldId = (payload.old as { id?: string })?.id;
           if (!oldId) {
             // Full clear or missing id: refetch
-            supabase
-              .from("messages")
-              .select("*")
-              .eq("conversation_id", CONVERSATION_ID)
-              .order("created_at", { ascending: true })
-              .limit(500)
-              .then(({ data }) => setMessages((data ?? []) as ChatMessage[]));
+            fetchRecentMessages().then((rows) => setMessages(rows));
+
             return;
           }
           setMessages((prev) => prev.filter((x) => x.id !== oldId));
@@ -691,6 +787,9 @@ export function ChatRoom() {
               onDeleteCallForMe={onDeleteCallForMe}
               onEdit={onEditMessage}
               onToggleReaction={onToggleReaction}
+              hasMoreOlder={hasMoreOlder}
+              onLoadOlder={loadOlder}
+
             />
 
             <Composer
