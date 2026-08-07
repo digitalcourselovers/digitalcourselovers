@@ -822,11 +822,10 @@ function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
       } catch {
         signed = null;
       }
-      if (!signed) {
-        // Legacy attachments still live in the old storage bucket.
-        const { data } = await supabase.storage.from("chat-media").createSignedUrl(path, 60 * 60);
-        signed = data?.signedUrl ?? null;
-      }
+      // R2 is the only media origin now — no fallback fetch to the database
+      // storage bucket, so it never serves bytes (keeps its egress flat).
+      if (!signed) return "error";
+      
       if (!signed) return "error";
       if (!encrypted) {
         setCachedSignedUrl(path, signed);
