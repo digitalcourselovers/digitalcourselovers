@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { StickerPicker } from "./StickerPicker";
 import { notifyPeer } from "@/lib/push.functions";
+import { createUploadUrl } from "@/lib/r2.functions";
 import { ENC_FILE_SUFFIX, encryptBlob, encryptText, useE2eeKey } from "@/lib/e2ee";
 
 export type ReplyTarget = {
@@ -32,10 +33,23 @@ export function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const notify = useServerFn(notifyPeer);
+  const getUploadUrl = useServerFn(createUploadUrl);
   const encKey = useE2eeKey();
   const ping = () => {
     notify({ data: { conversationId } }).catch(() => {});
   };
+
+  /** Uploads encrypted bytes straight to Cloudflare R2 via a signed URL. */
+  async function putToR2(path: string, sealed: Blob) {
+    const { url } = await getUploadUrl({ data: { key: path } });
+    const res = await fetch(url, {
+      method: "PUT",
+      body: sealed,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    if (!res.ok) throw new Error(`R2 upload failed (${res.status})`);
+  }
+
 
   useEffect(() => {
     if (replyTarget) textareaRef.current?.focus();
@@ -102,12 +116,11 @@ export function Composer({
     const safeName = (file.name || `paste-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "_");
     const path = `${currentUserId}/${crypto.randomUUID()}-${safeName}${ENC_FILE_SUFFIX}`;
     const sealed = await encryptBlob(key, file);
-    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, sealed, {
-      contentType: "application/octet-stream",
-    });
-    if (upErr) {
+    try {
+      await putToR2(path, sealed);
+    } catch (e) {
       setBusy(false);
-      alert("Upload failed: " + upErr.message);
+      alert("Upload failed: " + (e as Error).message);
       return;
     }
     const caption = text.trim();
@@ -163,10 +176,9 @@ export function Composer({
     const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "mp4" : "webm";
     const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}${ENC_FILE_SUFFIX}`;
     const sealed = await encryptBlob(key, blob);
-    const { error: upErr } = await supabase.storage.from("chat-media").upload(path, sealed, {
-      contentType: "application/octet-stream",
-    });
-    if (upErr) {
+    try {
+      await putToR2(path, sealed);
+    } catch {
       setBusy(false);
       alert("Voice upload failed");
       return;

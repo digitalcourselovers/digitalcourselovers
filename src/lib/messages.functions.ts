@@ -33,6 +33,8 @@ export const deleteConversationMessages = createServerFn({ method: "POST" })
     if (error) throw new Error(error.message);
 
     if (paths.length) {
+      const { deleteObjects } = await import("./r2.server");
+      await deleteObjects(paths);
       const { error: storageError } = await supabaseAdmin.storage.from("chat-media").remove(paths);
       if (storageError) console.error("[media] storage cleanup failed", storageError.message);
     }
@@ -59,6 +61,8 @@ export const deleteMessageById = createServerFn({ method: "POST" })
     if (error) throw new Error(error.message);
 
     if (paths.length) {
+      const { deleteObjects } = await import("./r2.server");
+      await deleteObjects(paths);
       const { error: storageError } = await supabaseAdmin.storage.from("chat-media").remove(paths);
       if (storageError) console.error("[media] storage cleanup failed", storageError.message);
     }

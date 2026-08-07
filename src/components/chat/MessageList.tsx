@@ -2,7 +2,9 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Reply, Copy, Trash2, CornerUpLeft, Pencil, Plus, Video, PhoneCall, PhoneMissed, PhoneOutgoing, PhoneIncoming } from "lucide-react";
 const EmojiPicker = lazy(() => import("@emoji-mart/react"));
 import emojiData from "@emoji-mart/data";
+import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
+import { createReadUrl } from "@/lib/r2.functions";
 import { decryptToBlob, isEncryptedPath, useE2eeKey } from "@/lib/e2ee";
 import {
   dedupe,
@@ -797,6 +799,7 @@ function VoiceBubble({
  */
 function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
   const key = useE2eeKey();
+  const readUrl = useServerFn(createReadUrl);
   const encrypted = isEncryptedPath(path);
   const [url, setUrl] = useState<string | null>(
     () => getCachedObjectUrl(path) ?? getCachedSignedUrl(path) ?? null,
@@ -812,8 +815,18 @@ function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
     if (encrypted && !key) return;
     let mounted = true;
     dedupe(path, async () => {
-      const { data } = await supabase.storage.from("chat-media").createSignedUrl(path, 60 * 60);
-      const signed = data?.signedUrl;
+      let signed: string | null = null;
+      try {
+        const r2 = await readUrl({ data: { key: path } });
+        signed = r2.url ?? null;
+      } catch {
+        signed = null;
+      }
+      if (!signed) {
+        // Legacy attachments still live in the old storage bucket.
+        const { data } = await supabase.storage.from("chat-media").createSignedUrl(path, 60 * 60);
+        signed = data?.signedUrl ?? null;
+      }
       if (!signed) return "error";
       if (!encrypted) {
         setCachedSignedUrl(path, signed);
