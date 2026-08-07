@@ -14,6 +14,9 @@ import {
   setCachedObjectUrl,
   setCachedSignedUrl,
 } from "@/lib/media-cache";
+import { usePendingUploads, type PendingUpload } from "@/lib/pending-uploads";
+import { MediaProgress } from "./MediaProgress";
+
 
 
 
@@ -96,6 +99,8 @@ export function MessageList({
   const flashTimer = useRef<number | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const restoreRef = useRef<number | null>(null);
+  const pending = usePendingUploads();
+
 
 
   const jumpToMessage = (id: string) => {
@@ -421,9 +426,23 @@ export function MessageList({
               </div>
             );
           })}
-          {items.length === 0 && (
+          {pending.map((p) => (
+            <div key={`pending-${p.id}`} className="flex justify-end">
+              <div className="max-w-[75%] select-none rounded-2xl rounded-br-md bg-[var(--bub-out)] px-3.5 py-2 text-sm text-[var(--bub-out-fg)] shadow-sm">
+                <PendingBubble item={p} />
+                <div className="mt-1 flex items-center gap-1 text-[10px] text-[var(--bub-out-fg)] opacity-80">
+                  <span>
+                    {new Date(p.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                  <span>{p.status === "error" ? "!" : "🕘"}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+          {items.length === 0 && pending.length === 0 && (
             <div className="mt-20 text-center text-sm text-slate-500">Say something.</div>
           )}
+
         </div>
         <span className="hidden">{Object.keys(profiles).length}</span>
       </div>
@@ -709,13 +728,66 @@ function useInView<T extends HTMLElement>() {
   return { ref, inView };
 }
 
+/** Outgoing attachment that is still uploading (local preview + progress ring). */
+function PendingBubble({ item }: { item: PendingUpload }) {
+  const error = item.status === "error";
+  return (
+    <div className="space-y-1">
+      {item.kind === "voice" ? (
+        <div className="flex items-center gap-2">
+          <MediaProgress
+            progress={error ? null : item.progress}
+            variant={error ? "error" : "upload"}
+            size={28}
+            onCancel={error ? item.retry : item.cancel}
+            label={error ? "Retry voice upload" : "Uploading voice message"}
+          />
+          <span className="text-xs opacity-80">Voice message</span>
+          {item.durationMs != null && (
+            <span className="text-[10px] opacity-70">{Math.round(item.durationMs / 1000)}s</span>
+          )}
+        </div>
+      ) : (
+        <div className="relative overflow-hidden rounded-lg">
+          {item.previewUrl && item.kind === "image" ? (
+            <img
+              src={item.previewUrl}
+              alt="uploading attachment"
+              className="max-h-72 rounded-lg opacity-60 blur-[1px]"
+            />
+          ) : item.previewUrl && item.kind === "video" ? (
+            <video
+              src={item.previewUrl}
+              muted
+              playsInline
+              preload="metadata"
+              className="max-h-72 rounded-lg opacity-60 blur-[1px]"
+            />
+          ) : (
+            <div className="h-40 w-56 rounded-lg bg-black/30" />
+          )}
+          <div className="absolute inset-0 grid place-items-center">
+            <MediaProgress
+              progress={error ? null : item.progress}
+              variant={error ? "error" : "upload"}
+              onCancel={error ? item.retry : item.cancel}
+              label={error ? "Retry upload" : "Uploading attachment"}
+            />
+          </div>
+        </div>
+      )}
+      {item.caption && <div className="whitespace-pre-wrap break-words">{item.caption}</div>}
+    </div>
+  );
+}
+
 function MediaBubble({ path, kind, body }: { path: string; kind: string | null; body: string | null }) {
   const isImage = kind?.startsWith("image/");
   const isVideo = kind?.startsWith("video/");
   const { ref, inView } = useInView<HTMLDivElement>();
   const [opened, setOpened] = useState(false);
   // Images resolve once scrolled near; video/file wait for an explicit tap.
-  const url = useMediaUrl(path, kind, isImage ? inView : opened);
+  const { url, progress, retry } = useMediaUrl(path, kind, isImage ? inView : opened);
 
   return (
     <div ref={ref} className="space-y-1">
@@ -729,13 +801,21 @@ function MediaBubble({ path, kind, body }: { path: string; kind: string | null; 
           ▶
         </button>
       ) : url === "error" ? (
-        <span className="text-xs opacity-70">🔒 Unable to open</span>
+        <div className="grid h-40 w-56 place-items-center rounded-lg bg-black/25">
+          <MediaProgress progress={null} variant="error" onCancel={retry} label="Retry download" />
+        </div>
       ) : !url ? (
-        <div className="grid h-40 w-56 place-items-center rounded-lg bg-black/20 text-xs opacity-70">
-          loading…
+        <div className="grid h-40 w-56 place-items-center rounded-lg bg-black/25">
+          <MediaProgress progress={progress} variant="download" label="Loading attachment" />
         </div>
       ) : isImage ? (
-        <img src={url} alt="attachment" loading="lazy" decoding="async" className="max-h-72 rounded-lg" />
+        <img
+          src={url}
+          alt="attachment"
+          loading="lazy"
+          decoding="async"
+          className="max-h-72 rounded-lg animate-fade-in"
+        />
       ) : isVideo ? (
         <video src={url} controls autoPlay preload="none" className="max-h-72 rounded-lg" />
       ) : (
@@ -758,7 +838,7 @@ function VoiceBubble({
   kind?: string | null;
 }) {
   const [opened, setOpened] = useState(false);
-  const url = useMediaUrl(path, kind ?? "audio/wav", opened);
+  const { url, progress, retry } = useMediaUrl(path, kind ?? "audio/wav", opened);
   const seconds = durationMs != null ? `${Math.round(durationMs / 1000)}s` : null;
 
   if (!opened) {
@@ -781,9 +861,9 @@ function VoiceBubble({
   return (
     <div className="flex items-center gap-2">
       {url === "error" ? (
-        <span className="text-xs opacity-70">🔒 Unable to open</span>
+        <MediaProgress progress={null} variant="error" size={28} onCancel={retry} label="Retry download" />
       ) : !url ? (
-        <span className="text-xs opacity-70">loading…</span>
+        <MediaProgress progress={progress} variant="download" size={28} label="Loading voice message" />
       ) : (
         <audio src={url} controls autoPlay preload="none" className="h-8 max-w-[220px]" />
       )}
@@ -796,6 +876,7 @@ function VoiceBubble({
  * Resolves a storage path to a playable URL, but only once `enabled` is true so
  * nothing is downloaded before the user actually sees or opens the attachment.
  * Signed URLs and decrypted blobs are cached and reused across renders.
+ * Also reports download progress for the transfer ring.
  */
 function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
   const key = useE2eeKey();
@@ -804,6 +885,8 @@ function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
   const [url, setUrl] = useState<string | null>(
     () => getCachedObjectUrl(path) ?? getCachedSignedUrl(path) ?? null,
   );
+  const [progress, setProgress] = useState<number | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!enabled || url) return;
@@ -825,14 +908,15 @@ function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
       // R2 is the only media origin now — no fallback fetch to the database
       // storage bucket, so it never serves bytes (keeps its egress flat).
       if (!signed) return "error";
-      
-      if (!signed) return "error";
+
       if (!encrypted) {
         setCachedSignedUrl(path, signed);
         return signed;
       }
       try {
-        const buf = await fetchCachedBytes(path, signed);
+        const buf = await fetchCachedBytes(path, signed, (p) => {
+          if (mounted) setProgress(p);
+        });
         const blob = await decryptToBlob(key!, buf, mime || "application/octet-stream");
         const objUrl = URL.createObjectURL(blob);
         setCachedObjectUrl(path, objUrl);
@@ -846,10 +930,17 @@ function useMediaUrl(path: string, mime: string | null, enabled: boolean) {
     return () => {
       mounted = false;
     };
-  }, [path, encrypted, key, mime, enabled, url]);
+  }, [path, encrypted, key, mime, enabled, url, attempt, readUrl]);
 
-  return url;
+  const retry = () => {
+    setUrl(null);
+    setProgress(null);
+    setAttempt((a) => a + 1);
+  };
+
+  return { url, progress, retry };
 }
+
 
 
 

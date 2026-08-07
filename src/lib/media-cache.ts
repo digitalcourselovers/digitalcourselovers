@@ -50,26 +50,66 @@ export function dedupe(path: string, run: () => Promise<string | null>): Promise
 }
 
 /** Fetches encrypted bytes, serving from Cache Storage when available. */
-export async function fetchCachedBytes(cacheKey: string, signedUrl: string): Promise<ArrayBuffer> {
+export async function fetchCachedBytes(
+  cacheKey: string,
+  signedUrl: string,
+  onProgress?: (fraction: number | null) => void,
+): Promise<ArrayBuffer> {
   const key = `https://chat-media.local/${encodeURIComponent(cacheKey)}`;
   if (typeof caches !== "undefined") {
     try {
       const cache = await caches.open(CACHE_NAME);
       const hit = await cache.match(key);
-      if (hit) return await hit.arrayBuffer();
-      const res = await fetch(signedUrl);
-      if (!res.ok) throw new Error(`media fetch failed: ${res.status}`);
-      const buf = await res.arrayBuffer();
+      if (hit) {
+        onProgress?.(1);
+        return await hit.arrayBuffer();
+      }
+      const buf = await download(signedUrl, onProgress);
       await cache.put(key, new Response(buf.slice(0)));
       return buf;
     } catch {
       /* fall through to a plain fetch */
     }
   }
-  const res = await fetch(signedUrl);
-  if (!res.ok) throw new Error(`media fetch failed: ${res.status}`);
-  return await res.arrayBuffer();
+  return await download(signedUrl, onProgress);
 }
+
+/** Streams a response so download progress can be reported when possible. */
+async function download(
+  url: string,
+  onProgress?: (fraction: number | null) => void,
+): Promise<ArrayBuffer> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`media fetch failed: ${res.status}`);
+  const total = Number(res.headers.get("content-length") || 0);
+  if (!res.body || !total || !onProgress) {
+    onProgress?.(null);
+    const buf = await res.arrayBuffer();
+    onProgress?.(1);
+    return buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress(Math.min(received / total, 1));
+    }
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  onProgress(1);
+  return out.buffer;
+}
+
 
 /** Drops cached copies of a deleted attachment. */
 export async function forgetMedia(paths: string[]) {

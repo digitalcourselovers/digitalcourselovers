@@ -7,6 +7,10 @@ import { StickerPicker } from "./StickerPicker";
 import { notifyPeer } from "@/lib/push.functions";
 import { createUploadUrl } from "@/lib/r2.functions";
 import { ENC_FILE_SUFFIX, encryptBlob, encryptText, useE2eeKey } from "@/lib/e2ee";
+import { addPending, removePending, updatePending } from "@/lib/pending-uploads";
+
+class UploadAborted extends Error {}
+
 
 export type ReplyTarget = {
   id: string;
@@ -39,16 +43,35 @@ export function Composer({
     notify({ data: { conversationId } }).catch(() => {});
   };
 
-  /** Uploads encrypted bytes straight to Cloudflare R2 via a signed URL. */
-  async function putToR2(path: string, sealed: Blob) {
+  /**
+   * Uploads encrypted bytes straight to Cloudflare R2 via a signed URL.
+   * Uses XHR so real byte progress is reported and the transfer can be aborted.
+   */
+  async function putToR2(
+    path: string,
+    sealed: Blob,
+    onProgress?: (fraction: number | null) => void,
+    registerAbort?: (abort: () => void) => void,
+  ) {
     const { url } = await getUploadUrl({ data: { key: path } });
-    const res = await fetch(url, {
-      method: "PUT",
-      body: sealed,
-      headers: { "Content-Type": "application/octet-stream" },
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      registerAbort?.(() => xhr.abort());
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => {
+        onProgress?.(e.lengthComputable ? e.loaded / e.total : null);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`R2 upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error("R2 upload failed"));
+      xhr.onabort = () => reject(new UploadAborted());
+      xhr.send(sealed);
     });
-    if (!res.ok) throw new Error(`R2 upload failed (${res.status})`);
   }
+
 
 
   useEffect(() => {
@@ -112,31 +135,74 @@ export function Composer({
     if (!currentUserId) return;
     const key = requireKey();
     if (!key) return;
-    setBusy(true);
-    const safeName = (file.name || `paste-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "_");
-    const path = `${currentUserId}/${crypto.randomUUID()}-${safeName}${ENC_FILE_SUFFIX}`;
-    const sealed = await encryptBlob(key, file);
-    try {
-      await putToR2(path, sealed);
-    } catch (e) {
-      setBusy(false);
-      alert("Upload failed: " + (e as Error).message);
-      return;
-    }
     const caption = text.trim();
-    await supabase.from("messages").insert({
-      conversation_id: conversationId,
-      sender_id: currentUserId,
-      media_path: path,
-      media_kind: file.type,
-      body: caption ? await encryptText(key, caption) : null,
-      reply_to_id: replyTarget?.id ?? null,
-    });
+    const replyId = replyTarget?.id ?? null;
+    // Show the bubble immediately, then clear the editor like WhatsApp does.
     clearEditor();
     onClearReply();
-    setBusy(false);
-    ping();
+
+    const isImage = file.type.startsWith("image/");
+    const isVideo = file.type.startsWith("video/");
+    const pendingId = crypto.randomUUID();
+    const previewUrl = isImage || isVideo ? URL.createObjectURL(file) : null;
+    let abort: (() => void) | null = null;
+
+    const run = async () => {
+      updatePending(pendingId, { status: "uploading", progress: 0 });
+      const safeName = (file.name || `paste-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "_");
+      const path = `${currentUserId}/${crypto.randomUUID()}-${safeName}${ENC_FILE_SUFFIX}`;
+      try {
+        const sealed = await encryptBlob(key, file);
+        await putToR2(
+          path,
+          sealed,
+          (p) => updatePending(pendingId, { progress: p }),
+          (a) => {
+            abort = a;
+          },
+        );
+      } catch (e) {
+        if (e instanceof UploadAborted) return;
+        updatePending(pendingId, { status: "error", progress: null });
+        return;
+      }
+      const { error } = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: currentUserId,
+        media_path: path,
+        media_kind: file.type,
+        body: caption ? await encryptText(key, caption) : null,
+        reply_to_id: replyId,
+      });
+      if (error) {
+        updatePending(pendingId, { status: "error", progress: null });
+        return;
+      }
+      removePending(pendingId);
+      ping();
+    };
+
+    addPending({
+      id: pendingId,
+      kind: isImage ? "image" : isVideo ? "video" : "file",
+      previewUrl,
+      caption: caption || null,
+      durationMs: null,
+      progress: 0,
+      status: "uploading",
+      createdAt: new Date().toISOString(),
+      cancel: () => {
+        abort?.();
+        removePending(pendingId);
+      },
+      retry: () => {
+        void run();
+      },
+    });
+
+    await run();
   }
+
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -172,28 +238,66 @@ export function Composer({
     if (!currentUserId) return;
     const key = requireKey();
     if (!key) return;
-    setBusy(true);
-    const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "mp4" : "webm";
-    const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}${ENC_FILE_SUFFIX}`;
-    const sealed = await encryptBlob(key, blob);
-    try {
-      await putToR2(path, sealed);
-    } catch {
-      setBusy(false);
-      alert("Voice upload failed");
-      return;
-    }
-    await supabase.from("messages").insert({
-      conversation_id: conversationId,
-      sender_id: currentUserId,
-      voice_path: path,
-      voice_duration_ms: durationMs,
-      media_kind: blob.type || "audio/wav",
-      reply_to_id: replyTarget?.id ?? null,
-    });
+    const replyId = replyTarget?.id ?? null;
     onClearReply();
-    setBusy(false);
-    ping();
+    const pendingId = crypto.randomUUID();
+    let abort: (() => void) | null = null;
+
+    const run = async () => {
+      updatePending(pendingId, { status: "uploading", progress: 0 });
+      const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "mp4" : "webm";
+      const path = `${currentUserId}/voice-${crypto.randomUUID()}.${ext}${ENC_FILE_SUFFIX}`;
+      try {
+        const sealed = await encryptBlob(key, blob);
+        await putToR2(
+          path,
+          sealed,
+          (p) => updatePending(pendingId, { progress: p }),
+          (a) => {
+            abort = a;
+          },
+        );
+      } catch (e) {
+        if (e instanceof UploadAborted) return;
+        updatePending(pendingId, { status: "error", progress: null });
+        return;
+      }
+      const { error } = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: currentUserId,
+        voice_path: path,
+        voice_duration_ms: durationMs,
+        media_kind: blob.type || "audio/wav",
+        reply_to_id: replyId,
+      });
+      if (error) {
+        updatePending(pendingId, { status: "error", progress: null });
+        return;
+      }
+      removePending(pendingId);
+      ping();
+    };
+
+    addPending({
+      id: pendingId,
+      kind: "voice",
+      previewUrl: null,
+      caption: null,
+      durationMs,
+      progress: 0,
+      status: "uploading",
+      createdAt: new Date().toISOString(),
+      cancel: () => {
+        abort?.();
+        removePending(pendingId);
+      },
+      retry: () => {
+        void run();
+      },
+    });
+
+    await run();
+
   }
 
   async function sendGif(url: string) {
