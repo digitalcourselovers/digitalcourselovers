@@ -35,7 +35,7 @@ export function MediaProgress({
         <svg
           width={size}
           height={size}
-          className={pct == null ? "animate-spin" : ""}
+          className={pct == null && variant !== "error" ? "animate-spin" : ""}
           viewBox={`0 0 ${size} ${size}`}
         >
           <circle
@@ -51,12 +51,12 @@ export function MediaProgress({
             cy={size / 2}
             r={r}
             fill="none"
-            stroke={done ? "#22c55e" : "currentColor"}
-            className={done ? "" : "text-[var(--chat-accent,#f43f5e)]"}
+            stroke={done ? "#22c55e" : variant === "error" ? "#f43f5e" : "currentColor"}
+            className={done || variant === "error" ? "" : "text-[var(--chat-accent,#f43f5e)]"}
             strokeWidth={stroke}
             strokeLinecap="round"
             strokeDasharray={c}
-            strokeDashoffset={pct == null ? c * 0.72 : c * (1 - pct)}
+            strokeDashoffset={variant === "error" ? 0 : pct == null ? c * 0.72 : c * (1 - pct)}
             transform={`rotate(-90 ${size / 2} ${size / 2})`}
             style={{ transition: pct == null ? undefined : "stroke-dashoffset 150ms linear" }}
           />

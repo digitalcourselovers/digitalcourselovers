@@ -121,6 +121,8 @@ export function ChatRoom() {
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(0);
+  const [forcedExit, setForcedExit] = useState(false);
+  const forceExitRef = useRef<() => void>(() => {});
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [hiddenIds, setHiddenIds] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -399,6 +401,11 @@ export function ChatRoom() {
         const signal = payload.payload as CallSignal | undefined;
         if (signal?.type) void callSignalRef.current(signal);
       })
+      .on("broadcast", { event: "force-exit" }, (payload) => {
+        // BF's Quick Exit pulls GF out of the chat too.
+        if ((payload.payload as { userId?: string } | undefined)?.userId === user.id) return;
+        forceExitRef.current();
+      })
       .on("broadcast", { event: "typing" }, (payload) => {
         if (payload.payload?.userId && payload.payload.userId !== user.id) {
           setPeerTyping(true);
@@ -458,11 +465,26 @@ export function ChatRoom() {
   }, [messages, user]);
 
   const email = user?.email ?? "";
+  const isBf = email.startsWith("bf@");
   const assistantName = email.startsWith("bf@") ? "GPT Assistant" : "Gemini Assistant";
   const assistantInitial = email.startsWith("bf@") ? "G" : "G";
   const gradient = email.startsWith("bf@")
     ? "from-emerald-400 to-teal-500"
     : "from-blue-400 via-purple-500 to-pink-500";
+
+  // Remote exit triggered by BF's Quick Exit: hide instantly, then leave.
+  forceExitRef.current = () => {
+    if (isBf) return;
+    try {
+      call.hangup();
+    } catch {
+      /* noop */
+    }
+    setForcedExit(true);
+    lock().catch(() => {});
+    window.setTimeout(() => window.location.replace("/"), 50);
+  };
+
 
   // Decrypt message bodies locally. Ciphertext never leaves the DB decrypted.
   const encKey = useE2eeKey();
@@ -681,6 +703,14 @@ export function ChatRoom() {
     notify({ data: { conversationId: CONVERSATION_ID } }).catch(() => {});
   }
 
+  if (forcedExit) {
+    return (
+      <div className="fixed inset-0 z-[100] grid place-items-center bg-white">
+        <div className="text-sm text-slate-500">Loading course…</div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="fixed left-0 right-0 flex w-full overflow-hidden bg-[#0a0a0a] text-slate-100"
@@ -767,7 +797,18 @@ export function ChatRoom() {
             >
               <Trash2 className="h-[18px] w-[18px] sm:h-5 sm:w-5" />
             </button>
-            <QuickExit onBeforeExit={() => call.hangup()} />
+            <QuickExit
+              onBeforeExit={() => {
+                call.hangup();
+                if (isBf && user) {
+                  channelRef.current?.send({
+                    type: "broadcast",
+                    event: "force-exit",
+                    payload: { userId: user.id },
+                  });
+                }
+              }}
+            />
           </div>
         </header>
 
